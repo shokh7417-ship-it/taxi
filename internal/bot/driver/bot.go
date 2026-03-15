@@ -270,11 +270,12 @@ func sendOnOnlineLiveLocationInstruction(bot *tgbotapi.BotAPI, db *sql.DB, chatI
 func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotAPI, matchService *services.MatchService, assignmentService *services.AssignmentService, tripService *services.TripService) error {
 	log.Printf("driver bot: started @%s", bot.Self.UserName)
 
-	// Set command panel: /start, /status, /referral, /leaderboard, /online, /offline.
+	// Set command panel: /start, /status, /referral, /bonuslar, /leaderboard, /online, /offline.
 	if _, err := bot.Request(tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "Botni boshlash"},
 		tgbotapi.BotCommand{Command: "status", Description: "Holat va balans"},
-		tgbotapi.BotCommand{Command: "referral", Description: "Referral statistikasi"},
+		tgbotapi.BotCommand{Command: "referral", Description: "Do'stlarni taklif qilish"},
+		tgbotapi.BotCommand{Command: "bonuslar", Description: "Bonuslar va referral statistikasi"},
 		tgbotapi.BotCommand{Command: "leaderboard", Description: "Eng faol haydovchilar"},
 		tgbotapi.BotCommand{Command: "online", Description: "Onlayn bo'lish"},
 		tgbotapi.BotCommand{Command: "offline", Description: "Oflayn bo'lish"},
@@ -371,6 +372,9 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 		return
 	case "referral":
 		handleReferral(bot, db, chatID, telegramID)
+		return
+	case "bonuslar":
+		handleBonuslar(bot, db, chatID, telegramID)
 		return
 	case "leaderboard":
 		handleLeaderboard(bot, db, chatID, telegramID)
@@ -766,8 +770,8 @@ func handleOffline(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	}
 }
 
-// handleReferral replies to /referral with referral count, earnings, and shareable link.
-// If the user has no referral_code (e.g. created before referral fields), one is generated and saved (backfill).
+// handleReferral sends an invitation-style message with the shareable link only (for forwarding to others).
+// If the user has no referral_code, one is generated and saved (backfill).
 func handleReferral(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	ctx := context.Background()
 	var userID int64
@@ -778,11 +782,53 @@ func handleReferral(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) 
 	}
 	code := referralCode.String
 	if !referralCode.Valid || code == "" {
-		// Backfill: generate and save referral code for existing drivers
 		var err error
 		code, err = utils.GenerateReferralCode(ctx, db)
 		if err != nil {
 			log.Printf("driver: generate referral code for /referral: %v", err)
+			send(bot, chatID, "Xatolik. Qayta urinib ko'ring.")
+			return
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE users SET referral_code = ?1 WHERE id = ?2`, code, userID); err != nil {
+			log.Printf("driver: save referral code: %v", err)
+			send(bot, chatID, "Xatolik. Qayta urinib ko'ring.")
+			return
+		}
+	}
+	botUsername := ""
+	if bot != nil {
+		botUsername = bot.Self.UserName
+	}
+	shareLink := utils.ReferralLink(botUsername, code)
+	// Message written to the new user — when the driver forwards it, the recipient sees a direct invitation.
+	text := "🚕 YettiQanot Taxi — haydovchi sifatida ishlashingiz mumkin!\n\nSizni qo'shilishga taklif qilamiz. Boshlash uchun quyidagi havolani bosing:"
+	if shareLink != "" {
+		text += fmt.Sprintf("\n\n%s", shareLink)
+	}
+	text += "\n\n— Ushbu xabarni do'stlaringizga yuboring. Sizning statistikangiz: /bonuslar"
+	kb := getDriverKeyboard(db, userID)
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ReplyMarkup = kb
+	if _, err := bot.Send(m); err != nil {
+		log.Printf("driver: send referral: %v", err)
+	}
+}
+
+// handleBonuslar shows referral stats: referred count and bonus (for /bonuslar command).
+func handleBonuslar(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
+	ctx := context.Background()
+	var userID int64
+	var referralCode sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT u.id, u.referral_code FROM users u WHERE u.telegram_id = ?1`, telegramID).Scan(&userID, &referralCode); err != nil || userID == 0 {
+		send(bot, chatID, "Avval /start bosing.")
+		return
+	}
+	code := referralCode.String
+	if !referralCode.Valid || code == "" {
+		var err error
+		code, err = utils.GenerateReferralCode(ctx, db)
+		if err != nil {
+			log.Printf("driver: generate referral code for /bonuslar: %v", err)
 			send(bot, chatID, "Xatolik. Qayta urinib ko'ring.")
 			return
 		}
@@ -797,20 +843,13 @@ func handleReferral(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) 
 	var earnedCount int64
 	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE referred_by = ?1 AND COALESCE(referral_stage2_reward_paid, 0) = 1`, code).Scan(&earnedCount)
 	totalEarnings := earnedCount * 100000 // 100000 so'm per referred driver who completed 5 trips and met conditions
-	botUsername := ""
-	if bot != nil {
-		botUsername = bot.Self.UserName
-	}
-	shareLink := utils.ReferralLink(botUsername, code)
 	text := fmt.Sprintf("📊 Referral statistikasi\n\nTaklif qilgan haydovchilar: %d\nReferral bonus: %d so'm", referredCount, totalEarnings)
-	if shareLink != "" {
-		text += fmt.Sprintf("\n\n🔗 Taklif havolasi:\n%s", shareLink)
-	}
+	text += "\n\n🔗 Taklif havolasi: /referral"
 	kb := getDriverKeyboard(db, userID)
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ReplyMarkup = kb
 	if _, err := bot.Send(m); err != nil {
-		log.Printf("driver: send referral stats: %v", err)
+		log.Printf("driver: send bonuslar: %v", err)
 	}
 }
 
