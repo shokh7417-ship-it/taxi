@@ -780,10 +780,11 @@ func handleOffline(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	}
 }
 
-const referralBonusOnApplicationSoM = 20000 // so'm paid to referrer when referred driver completes application
+const referralBonusOnApplicationSoM = 20000   // so'm paid to referrer when referred driver completes application
+const referralStage1MaxPayments = 5           // driver can receive 20k at most 5 times from referral (5 × 20k)
 
-// rewardReferrerOnApplicationComplete pays 20k to the referrer and notifies them when a referred driver completes the application.
-// Idempotent: only runs if referred_by is set and referral_stage1_reward_paid is 0.
+// rewardReferrerOnApplicationComplete pays 20k to the referrer when a referred driver completes the application.
+// A referrer can receive this at most 5 times (5 × 20k so'm). Idempotent: only runs if referred_by is set and referral_stage1_reward_paid is 0.
 func rewardReferrerOnApplicationComplete(bot *tgbotapi.BotAPI, db *sql.DB, newDriverUserID int64) {
 	ctx := context.Background()
 	var referredBy sql.NullString
@@ -795,6 +796,14 @@ func rewardReferrerOnApplicationComplete(bot *tgbotapi.BotAPI, db *sql.DB, newDr
 	if err := db.QueryRowContext(ctx, `SELECT id, telegram_id FROM users WHERE referral_code = ?1`, referredBy.String).Scan(&referrerUserID, &referrerTelegramID); err != nil || referrerUserID == 0 {
 		return
 	}
+	// How many 20k payments has this referrer already received (excluding this new driver)?
+	var alreadyPaidCount int64
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE referred_by = ?1 AND COALESCE(referral_stage1_reward_paid, 0) = 1`, referredBy.String).Scan(&alreadyPaidCount)
+	// Mark this referred user as stage1 processed (so we don't try again).
+	_, _ = db.ExecContext(ctx, `UPDATE users SET referral_stage1_reward_paid = 1 WHERE id = ?1`, newDriverUserID)
+	if alreadyPaidCount >= referralStage1MaxPayments {
+		return // referrer already got 5 × 20k; no more payment or notification
+	}
 	res, err := db.ExecContext(ctx, `UPDATE drivers SET balance = balance + ?1 WHERE user_id = ?2`, referralBonusOnApplicationSoM, referrerUserID)
 	if err != nil {
 		log.Printf("driver: referral reward update balance: %v", err)
@@ -803,7 +812,6 @@ func rewardReferrerOnApplicationComplete(bot *tgbotapi.BotAPI, db *sql.DB, newDr
 	if nr, _ := res.RowsAffected(); nr == 0 {
 		return
 	}
-	_, _ = db.ExecContext(ctx, `UPDATE users SET referral_stage1_reward_paid = 1 WHERE id = ?1`, newDriverUserID)
 	var newDriverName string
 	_ = db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(TRIM(name), ''), 'Yangi haydovchi') FROM users WHERE id = ?1`, newDriverUserID).Scan(&newDriverName)
 	if referrerTelegramID != 0 && bot != nil {
