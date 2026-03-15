@@ -1,0 +1,19 @@
+# Render Blueprint: single instance to avoid Telegram getUpdates conflict
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: taxi-service
+    env: docker
+    # Critical: only 1 instance — Telegram allows one getUpdates connection per bot
+    numInstances: 1
+    envVars:
+      - key: RIDER_BOT_TOKEN
+        sync: false
+      - key: DRIVER_BOT_TOKEN
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: WEBAPP_URL
+        sync: false

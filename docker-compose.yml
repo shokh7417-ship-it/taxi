@@ -1,0 +1,8 @@
+# Backend uses Turso (libSQL). Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env
+# or DATABASE_URL with full libsql URL (libsql://...?authToken=...).
+services:
+  app:
+    build: .
+    env_file: .env
+    ports:
+      - "8080:8080"

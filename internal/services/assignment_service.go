@@ -1,0 +1,293 @@
+package services
+
+import (
+	"context"
+	"database/sql"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"taxi-mvp/internal/config"
+	"taxi-mvp/internal/domain"
+)
+
+// AssignmentService assigns requests to drivers and runs the expiry worker.
+type AssignmentService struct {
+	db         *sql.DB
+	riderBot   *tgbotapi.BotAPI
+	driverBot  *tgbotapi.BotAPI
+	cfg        *config.Config
+}
+
+// NewAssignmentService returns an AssignmentService.
+func NewAssignmentService(db *sql.DB, riderBot, driverBot *tgbotapi.BotAPI, cfg *config.Config) *AssignmentService {
+	return &AssignmentService{db: db, riderBot: riderBot, driverBot: driverBot, cfg: cfg}
+}
+
+// TryAssign atomically assigns the request to the driver. Only one driver can accept (race-safe).
+// Returns (true, tripID, nil) if assigned; (false, "", nil) if another driver already accepted.
+func (s *AssignmentService) TryAssign(ctx context.Context, requestID string, driverUserID int64) (assigned bool, tripID string, err error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE ride_requests
+		SET status = ?1, assigned_driver_user_id = ?2, assigned_at = datetime('now')
+		WHERE id = ?3 AND status = ?4 AND expires_at > datetime('now')`,
+		domain.RequestStatusAssigned, driverUserID, requestID, domain.RequestStatusPending)
+	if err != nil {
+		return false, "", err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return false, "", nil // another driver already accepted or request expired
+	}
+	var riderUserID int64
+	err = s.db.QueryRowContext(ctx, `SELECT rider_user_id FROM ride_requests WHERE id = ?1`, requestID).Scan(&riderUserID)
+	if err != nil {
+		return false, "", err
+	}
+	// Mark this driver's notification as ACCEPTED (for dispatch log)
+	_, _ = s.db.ExecContext(ctx, `UPDATE request_notifications SET status = ?1 WHERE request_id = ?2 AND driver_user_id = ?3`,
+		domain.NotificationStatusAccepted, requestID, driverUserID)
+
+	tripID = uuid.New().String()
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO trips (id, request_id, driver_user_id, rider_user_id, status)
+		VALUES (?1, ?2, ?3, ?4, ?5)`,
+		tripID, requestID, driverUserID, riderUserID, domain.TripStatusWaiting)
+	if err != nil {
+		return false, "", err
+	}
+	log.Printf("dispatch_audit: request=%s accepted_by=%d trip_id=%s", requestID, driverUserID, tripID)
+
+	var riderTelegramID int64
+	err = s.db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, riderUserID).Scan(&riderTelegramID)
+	if err == nil {
+		chatID := riderTelegramID
+		// Include driver info (phone first) so rider can contact the driver
+		var driverPhone, carType, color, plate string
+		var userPhone sql.NullString
+		_ = s.db.QueryRowContext(ctx, `
+			SELECT COALESCE(d.phone,''), COALESCE(d.car_type,''), COALESCE(d.color,''), COALESCE(d.plate,''), u.phone
+			FROM drivers d JOIN users u ON u.id = d.user_id WHERE d.user_id = ?1`, driverUserID).
+			Scan(&driverPhone, &carType, &color, &plate, &userPhone)
+		phone := strings.TrimSpace(driverPhone)
+		if phone == "" && userPhone.Valid && strings.TrimSpace(userPhone.String) != "" {
+			phone = strings.TrimSpace(userPhone.String)
+		}
+		body := "🚗 Haydovchi topildi!\n\nSizni quyidagi haydovchi olib ketadi:\n"
+		if phone != "" {
+			body += "📞 Telefon: " + phone + "\n"
+		}
+		if carType != "" {
+			body += "🚗 " + carType
+			if color != "" {
+				body += ", " + color
+			}
+			body += "\n"
+		} else if color != "" {
+			body += "🚗 " + color + "\n"
+		}
+		if plate != "" {
+			body += "🔢 " + plate + "\n"
+		}
+		msg := tgbotapi.NewMessage(chatID, body)
+		if s.cfg.RiderMapURL != "" {
+			riderMapURL := strings.TrimSuffix(s.cfg.RiderMapURL, "/") + "?trip_id=" + tripID
+			msg.ReplyMarkup = riderMapWebAppKeyboard("📍 Haydovchini kuzatish", riderMapURL)
+		}
+		if _, err := s.riderBot.Send(msg); err != nil {
+			log.Printf("assignment_service: notify rider: %v", err)
+		}
+		// Reply keyboard for trip-active state: Haydovchini kuzatish, Bekor qilish
+		riderTripActiveKeyboard := tgbotapi.NewReplyKeyboard(
+			tgbotapi.NewKeyboardButtonRow(
+				tgbotapi.NewKeyboardButton("📍 Haydovchini kuzatish"),
+				tgbotapi.NewKeyboardButton("❌ Bekor qilish"),
+			),
+		)
+		riderTripActiveKeyboard.ResizeKeyboard = true
+		kbMsg := tgbotapi.NewMessage(chatID, "Haydovchini xaritada kuzating yoki safarni bekor qilishingiz mumkin.")
+		kbMsg.ReplyMarkup = riderTripActiveKeyboard
+		if _, err := s.riderBot.Send(kbMsg); err != nil {
+			log.Printf("assignment_service: notify rider keyboard: %v", err)
+		}
+	}
+
+	notifRows, err := s.db.QueryContext(ctx, `
+		SELECT chat_id FROM request_notifications
+		WHERE request_id = ?1 AND driver_user_id != ?2`,
+		requestID, driverUserID)
+	if err != nil {
+		return true, tripID, nil
+	}
+	defer notifRows.Close()
+	for notifRows.Next() {
+		var chatID int64
+		if err := notifRows.Scan(&chatID); err != nil {
+			continue
+		}
+		msg := tgbotapi.NewMessage(chatID, "So'rov allaqachon olindi")
+		if _, err := s.driverBot.Send(msg); err != nil {
+			log.Printf("assignment_service: notify driver %d: %v", chatID, err)
+		}
+	}
+	return true, tripID, nil
+}
+
+// RunExpiryWorker runs every 5 seconds: marks expired PENDING requests as EXPIRED and notifies each rider "Haydovchi topilmadi."
+func (s *AssignmentService) RunExpiryWorker(ctx context.Context) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			s.expireRequests(ctx)
+		}
+	}
+}
+
+func (s *AssignmentService) expireRequests(ctx context.Context) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("assignment_service: begin tx: %v", err)
+		return
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE ride_requests SET status = ?1
+		WHERE status = ?2 AND expires_at <= datetime('now')
+		RETURNING id, rider_user_id`,
+		domain.RequestStatusExpired, domain.RequestStatusPending)
+	if err != nil {
+		log.Printf("assignment_service: expire update: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var riderUserIDs []int64
+	for rows.Next() {
+		var id string
+		var riderUserID int64
+		if err := rows.Scan(&id, &riderUserID); err != nil {
+			continue
+		}
+		riderUserIDs = append(riderUserIDs, riderUserID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("assignment_service: commit: %v", err)
+		return
+	}
+
+	for _, riderUserID := range riderUserIDs {
+		var telegramID int64
+		err := s.db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, riderUserID).Scan(&telegramID)
+		if err != nil {
+			continue
+		}
+		msg := tgbotapi.NewMessage(telegramID, "Haydovchi topilmadi.")
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("Qayta qidirish", "search_again"),
+			),
+		)
+		if _, err := s.riderBot.Send(msg); err != nil {
+			log.Printf("assignment_service: notify rider expired: %v", err)
+		}
+		// Restore main menu so rider has clear entry point
+		mainMenu := tgbotapi.NewReplyKeyboard(
+			tgbotapi.NewKeyboardButtonRow(
+				tgbotapi.NewKeyboardButton("🚕 Taxi chaqirish"),
+				tgbotapi.NewKeyboardButton("ℹ️ Yordam"),
+			),
+		)
+		mainMenu.ResizeKeyboard = true
+		kbMsg := tgbotapi.NewMessage(telegramID, "Yangi so'rov uchun «Taxi chaqirish» ni bosing.")
+		kbMsg.ReplyMarkup = mainMenu
+		if _, err := s.riderBot.Send(kbMsg); err != nil {
+			log.Printf("assignment_service: rider main menu after expiry: %v", err)
+		}
+	}
+}
+
+// RunRadiusExpansionWorker runs periodically: after RadiusExpansionMinutes, expands radius to ExpandedRadiusKm and re-broadcasts.
+func (s *AssignmentService) RunRadiusExpansionWorker(ctx context.Context, matchSvc *MatchService) {
+	if matchSvc == nil {
+		return
+	}
+	expansionDelay := time.Duration(s.cfg.RadiusExpansionMinutes) * time.Minute
+	if expansionDelay <= 0 {
+		expansionDelay = 5 * time.Minute
+	}
+	tick := time.NewTicker(1 * time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			s.expandRadiusAndRebroadcast(ctx, matchSvc, expansionDelay)
+		}
+	}
+}
+
+func (s *AssignmentService) expandRadiusAndRebroadcast(ctx context.Context, matchSvc *MatchService, expansionDelay time.Duration) {
+	cutoff := time.Now().Add(-expansionDelay)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM ride_requests
+		WHERE status = ?1 AND expires_at > datetime('now')
+		  AND (radius_expanded_at IS NULL)
+		  AND radius_km < ?2
+		  AND created_at <= ?3`,
+		domain.RequestStatusPending, s.cfg.ExpandedRadiusKm, cutoff)
+	if err != nil {
+		log.Printf("assignment_service: radius expansion query: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var requestID string
+		if err := rows.Scan(&requestID); err != nil {
+			continue
+		}
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE ride_requests SET radius_km = ?1, radius_expanded_at = datetime('now')
+			WHERE id = ?2 AND status = ?3 AND radius_expanded_at IS NULL`,
+			s.cfg.ExpandedRadiusKm, requestID, domain.RequestStatusPending)
+		if err != nil {
+			continue
+		}
+		log.Printf("assignment_service: expanded radius for request %s to %.1f km, re-broadcasting", requestID, s.cfg.ExpandedRadiusKm)
+		if err := matchSvc.BroadcastRequest(ctx, requestID); err != nil {
+			log.Printf("assignment_service: re-broadcast: %v", err)
+		}
+	}
+}
+
+// riderMapWebAppKeyboard returns an inline keyboard with one Web App button (opens Telegram Mini App).
+// Uses custom type because tgbotapi.InlineKeyboardButton does not expose web_app in this library version.
+func riderMapWebAppKeyboard(buttonText, webAppURL string) riderMapInlineKeyboard {
+	return riderMapInlineKeyboard{
+		InlineKeyboard: [][]riderMapWebAppButton{{
+			{Text: buttonText, WebApp: &riderMapWebAppInfo{URL: webAppURL}},
+		}},
+	}
+}
+
+type riderMapInlineKeyboard struct {
+	InlineKeyboard [][]riderMapWebAppButton `json:"inline_keyboard"`
+}
+type riderMapWebAppButton struct {
+	Text   string              `json:"text"`
+	WebApp *riderMapWebAppInfo `json:"web_app,omitempty"`
+}
+type riderMapWebAppInfo struct {
+	URL string `json:"url"`
+}
