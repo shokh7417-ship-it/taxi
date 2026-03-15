@@ -77,7 +77,7 @@ func main() {
 	go assignSvc.RunExpiryWorker(ctx)
 	go assignSvc.RunRadiusExpansionWorker(ctx, matchSvc)
 
-	srv := server.New(database, cfg, tripSvc, matchSvc, driverBot, hub, fareSvc)
+	srv := server.New(database, cfg, tripSvc, matchSvc, driverBot, riderBot, hub, fareSvc)
 	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: srv}
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

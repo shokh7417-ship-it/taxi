@@ -427,7 +427,9 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, ref
 	var userID int64
 	err = db.QueryRowContext(ctx, `
 		INSERT INTO users (telegram_id, role, referral_code, referred_by) VALUES (?1, ?2, ?3, ?4)
-		ON CONFLICT (telegram_id) DO UPDATE SET role = excluded.role
+		ON CONFLICT (telegram_id) DO UPDATE SET
+			role = excluded.role,
+			referral_code = COALESCE(referral_code, excluded.referral_code)
 		RETURNING id`,
 		telegramID, domain.RoleDriver, code, refArg).Scan(&userID)
 	if err != nil {
@@ -764,7 +766,8 @@ func handleOffline(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	}
 }
 
-// handleReferral replies to /referral with referral count and total referral earnings.
+// handleReferral replies to /referral with referral count, earnings, and shareable link.
+// If the user has no referral_code (e.g. created before referral fields), one is generated and saved (backfill).
 func handleReferral(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	ctx := context.Background()
 	var userID int64
@@ -773,16 +776,36 @@ func handleReferral(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) 
 		send(bot, chatID, "Avval /start bosing.")
 		return
 	}
-	if !referralCode.Valid || referralCode.String == "" {
-		send(bot, chatID, "Referral kodi topilmadi. /start bosing.")
-		return
+	code := referralCode.String
+	if !referralCode.Valid || code == "" {
+		// Backfill: generate and save referral code for existing drivers
+		var err error
+		code, err = utils.GenerateReferralCode(ctx, db)
+		if err != nil {
+			log.Printf("driver: generate referral code for /referral: %v", err)
+			send(bot, chatID, "Xatolik. Qayta urinib ko'ring.")
+			return
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE users SET referral_code = ?1 WHERE id = ?2`, code, userID); err != nil {
+			log.Printf("driver: save referral code: %v", err)
+			send(bot, chatID, "Xatolik. Qayta urinib ko'ring.")
+			return
+		}
 	}
 	var referredCount int64
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users u INNER JOIN drivers d ON d.user_id = u.id WHERE u.referred_by = ?1`, referralCode.String).Scan(&referredCount)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users u INNER JOIN drivers d ON d.user_id = u.id WHERE u.referred_by = ?1`, code).Scan(&referredCount)
 	var earnedCount int64
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE referred_by = ?1 AND COALESCE(referral_stage2_reward_paid, 0) = 1`, referralCode.String).Scan(&earnedCount)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE referred_by = ?1 AND COALESCE(referral_stage2_reward_paid, 0) = 1`, code).Scan(&earnedCount)
 	totalEarnings := earnedCount * 100000 // 100000 so'm per referred driver who completed 5 trips and met conditions
+	botUsername := ""
+	if bot != nil {
+		botUsername = bot.Self.UserName
+	}
+	shareLink := utils.ReferralLink(botUsername, code)
 	text := fmt.Sprintf("📊 Referral statistikasi\n\nTaklif qilgan haydovchilar: %d\nReferral bonus: %d so'm", referredCount, totalEarnings)
+	if shareLink != "" {
+		text += fmt.Sprintf("\n\n🔗 Taklif havolasi:\n%s", shareLink)
+	}
 	kb := getDriverKeyboard(db, userID)
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ReplyMarkup = kb

@@ -16,7 +16,8 @@ import (
 // New creates a Gin engine with API routes and optional webapp static files.
 // hub can be nil; if set, GET /ws is registered. fareSvc can be nil (then fare uses config only).
 // matchSvc and driverBot are used for driver auto-availability and notifications (e.g. after trip finish + Mini App location).
-func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc *services.MatchService, driverBot *tgbotapi.BotAPI, hub *ws.Hub, fareSvc *services.FareService) *gin.Engine {
+// riderBot is optional; used for rider referral link (bot username).
+func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc *services.MatchService, driverBot *tgbotapi.BotAPI, riderBot *tgbotapi.BotAPI, hub *ws.Hub, fareSvc *services.FareService) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.Use(corsMiddleware())
@@ -43,7 +44,9 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	r.POST("/trip/start", tryDriverID, driverAuth, handlers.TripStart(db, tripSvc))
 	r.POST("/trip/finish", tryDriverID, driverAuth, handlers.TripFinish(db, tripSvc))
 	r.POST("/trip/cancel/driver", tryDriverID, driverAuth, handlers.TripCancelDriver(db, tripSvc))
+	r.GET("/driver/referral-link", tryDriverID, driverAuth, handlers.DriverReferralLink(db, driverBot))
 	r.POST("/trip/cancel/rider", riderAuth, handlers.TripCancelRider(db, tripSvc))
+	r.GET("/rider/referral-link", riderAuth, handlers.RiderReferralLink(db, riderBot))
 
 	r.Static("/webapp", "./webapp")
 
