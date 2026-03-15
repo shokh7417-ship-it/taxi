@@ -434,7 +434,8 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, ref
 		INSERT INTO users (telegram_id, role, referral_code, referred_by) VALUES (?1, ?2, ?3, ?4)
 		ON CONFLICT (telegram_id) DO UPDATE SET
 			role = excluded.role,
-			referral_code = COALESCE(referral_code, excluded.referral_code)
+			referral_code = COALESCE(referral_code, excluded.referral_code),
+			referred_by = COALESCE(referred_by, excluded.referred_by)
 		RETURNING id`,
 		telegramID, domain.RoleDriver, code, refArg).Scan(&userID)
 	if err != nil {
