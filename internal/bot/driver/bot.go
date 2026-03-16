@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -20,14 +21,18 @@ import (
 const (
 	btnOnline       = "🟢 Onlinega o'tish"
 	btnStartWork    = "🟢 Ishni boshlash"
+	btnStopWork     = "🔴 Ishni to'xtatish"
 	btnOffline      = "🔴 Offlinega o'tish"
 	btnLiveLocation = "📡 Jonli lokatsiya yoqish"
 	cbAccept        = "accept:"
 
 	// Live Location = only edited_message.location updates; active only when last_live_location_at within 90s.
 	liveLocationActiveSeconds = 90
-	// Onboarding: shown when driver presses /start (registered).
-	onboardingMessage = "🚕 YettiQanot Haydovchi\n\nBuyurtmalar olish uchun 2 ta qadam kerak:\n\n1️⃣ Online bo'lish\n2️⃣ Jonli lokatsiyani yoqish"
+	// Onboarding: shown when driver completes registration.
+	onboardingMessage = "🚕 YettiQanot Haydovchi\n\nBuyurtmalar olish uchun 2 ta qadam:\n\n1️⃣ Ishni boshlash (online bo'lish)\n2️⃣ Jonli lokatsiyani yoqish\n\nShundan keyin sizga yaqin buyurtmalar keladi."
+
+	// Welcome bonus message: explains all driver bonuses (shown once after registration).
+	welcomeBonusMessage = "🎁 Haydovchi bonuslari\n\n1️⃣ Yangi haydovchi bonusi: 100 000 so'm platform krediti (hisobingizga qo'shildi)\n\n2️⃣ Birinchi oy 0% komissiya\n\n3️⃣ Online bonus: 1 soat online → +2 000 so'm. Kunlik limit: 20 000 so'm"
 	// Bilingual instruction line for all Live Location prompts.
 	liveLocationBilingualInstruction = "📎 → Геопозиция / Location → Транслировать геопозицию / Share Live Location"
 	// Instruction when driver presses "Jonli lokatsiya yoqish" and is not sharing live.
@@ -107,17 +112,26 @@ func isDriverBalanceSufficient(ctx context.Context, db *sql.DB, driverUserID int
 	return balance > 0
 }
 
-// isDriverFullyRegistered returns true if the driver has phone, car_type, color, and plate set (registration complete).
+// isDriverFullyRegistered returns true if the driver has completed registration and can use location/dispatch.
+// Either: (phone, car_type, color, plate + both doc photos) or (same four + verification_status = 'approved' for existing drivers).
 func isDriverFullyRegistered(ctx context.Context, db *sql.DB, driverUserID int64) bool {
-	var phone, carType, color, plate sql.NullString
-	err := db.QueryRowContext(ctx, `SELECT phone, car_type, color, plate FROM drivers WHERE user_id = ?1`, driverUserID).Scan(&phone, &carType, &color, &plate)
+	var phone, carType, color, plate, licenseFileID, vehicleFileID, verificationStatus sql.NullString
+	err := db.QueryRowContext(ctx, `SELECT phone, car_type, color, plate, license_photo_file_id, vehicle_doc_file_id, verification_status FROM drivers WHERE user_id = ?1`, driverUserID).
+		Scan(&phone, &carType, &color, &plate, &licenseFileID, &vehicleFileID, &verificationStatus)
 	if err != nil {
 		return false
 	}
-	return phone.Valid && strings.TrimSpace(phone.String) != "" &&
+	baseOk := phone.Valid && strings.TrimSpace(phone.String) != "" &&
 		carType.Valid && strings.TrimSpace(carType.String) != "" &&
 		color.Valid && strings.TrimSpace(color.String) != "" &&
 		plate.Valid && strings.TrimSpace(plate.String) != ""
+	if !baseOk {
+		return false
+	}
+	hasDocs := licenseFileID.Valid && strings.TrimSpace(licenseFileID.String) != "" &&
+		vehicleFileID.Valid && strings.TrimSpace(vehicleFileID.String) != ""
+	approved := verificationStatus.Valid && strings.TrimSpace(verificationStatus.String) == "approved"
+	return hasDocs || approved
 }
 
 // parseUTC parses a "2006-01-02 15:04:05" string as UTC (stored timestamps are UTC).
@@ -270,15 +284,13 @@ func sendOnOnlineLiveLocationInstruction(bot *tgbotapi.BotAPI, db *sql.DB, chatI
 func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotAPI, matchService *services.MatchService, assignmentService *services.AssignmentService, tripService *services.TripService) error {
 	log.Printf("driver bot: started @%s", bot.Self.UserName)
 
-	// Set command panel: /start, /status, /bonuslar, /referral, /leaderboard, /online, /offline.
+	// Set command panel: /start, /status, /bonuslar, /referral, /leaderboard (online/offline via buttons only).
 	driverCommands := tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "Botni boshlash"},
 		tgbotapi.BotCommand{Command: "status", Description: "Holat va balans"},
 		tgbotapi.BotCommand{Command: "bonuslar", Description: "Bonuslar va referral statistikasi"},
 		tgbotapi.BotCommand{Command: "referral", Description: "Do'stlarni taklif qilish"},
 		tgbotapi.BotCommand{Command: "leaderboard", Description: "Eng faol haydovchilar"},
-		tgbotapi.BotCommand{Command: "online", Description: "Onlayn bo'lish"},
-		tgbotapi.BotCommand{Command: "offline", Description: "Oflayn bo'lish"},
 	)
 	if _, err := bot.Request(driverCommands); err != nil {
 		log.Printf("driver bot: setMyCommands: %v", err)
@@ -302,14 +314,13 @@ func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotA
 	}
 }
 
-// driverKeyboardForStatus returns a single row: when offline [Jonli lokatsiya yoqish, Ishni boshlash], when online [Jonli lokatsiya yoqish, Offline].
+// driverKeyboardForStatus returns main control panel: offline [Ishni boshlash, Jonli lokatsiya yoqish], online [Ishni to'xtatish, Jonli lokatsiya yoqish].
 func driverKeyboardForStatus(isOnline bool) tgbotapi.ReplyKeyboardMarkup {
 	var row []tgbotapi.KeyboardButton
-	row = append(row, tgbotapi.NewKeyboardButton(btnLiveLocation))
 	if isOnline {
-		row = append(row, tgbotapi.NewKeyboardButton(btnOffline))
+		row = append(row, tgbotapi.NewKeyboardButton(btnStopWork), tgbotapi.NewKeyboardButton(btnLiveLocation))
 	} else {
-		row = append(row, tgbotapi.NewKeyboardButton(btnStartWork))
+		row = append(row, tgbotapi.NewKeyboardButton(btnStartWork), tgbotapi.NewKeyboardButton(btnLiveLocation))
 	}
 	kb := tgbotapi.NewReplyKeyboard(tgbotapi.NewKeyboardButtonRow(row...))
 	kb.ResizeKeyboard = true
@@ -327,6 +338,92 @@ func getDriverKeyboard(db *sql.DB, driverUserID int64) tgbotapi.ReplyKeyboardMar
 // KeyboardForOffline returns the reply keyboard for offline state (e.g. after deployment), so the driver sees "Online" and can go online.
 func KeyboardForOffline() tgbotapi.ReplyKeyboardMarkup {
 	return driverKeyboardForStatus(false)
+}
+
+// pinnedStatusMessageIDs stores chatID -> messageID for the pinned driver status panel (in-memory only).
+var pinnedStatusMessageIDs sync.Map
+
+// formatStatusPanelText returns the status panel text (same layout as /status and pinned panel), including today's online bonus.
+func formatStatusPanelText(ctx context.Context, db *sql.DB, userID int64) (string, error) {
+	var isActive int
+	var balance int64
+	var lastLiveAt sql.NullString
+	var onlineBonusToday int64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(is_active, 0), COALESCE(balance, 0), last_live_location_at, COALESCE(online_bonus_so_m_today, 0) FROM drivers WHERE user_id = ?1`, userID).Scan(&isActive, &balance, &lastLiveAt, &onlineBonusToday); err != nil {
+		return "", err
+	}
+	holat := "🔴 Offline"
+	if isActive == 1 {
+		holat = "🟢 Online"
+	}
+	liveLine := "❌ Jonli lokatsiya yoqilmagan"
+	if lastLiveAt.Valid && lastLiveAt.String != "" {
+		if t, err := parseUTC(lastLiveAt.String); err == nil && time.Since(t) <= time.Duration(liveLocationActiveSeconds)*time.Second {
+			liveLine = "📡 Jonli lokatsiya yoqilgan"
+		}
+	}
+	text := fmt.Sprintf("📊 Haydovchi holati\n\nHolat: %s\nLokatsiya: %s\nBalans: %d so'm", holat, liveLine, balance)
+	text += fmt.Sprintf("\n\n🎁 Bugungi online bonus:\n%d / 20 000 so'm", onlineBonusToday)
+	return text, nil
+}
+
+// sendOrUpdatePinnedStatus sends or updates the pinned status message for the driver. If a pinned message exists, edits it; otherwise sends new, stores message_id, and pins.
+func sendOrUpdatePinnedStatus(bot *tgbotapi.BotAPI, db *sql.DB, chatID, userID int64) {
+	ctx := context.Background()
+	text, err := formatStatusPanelText(ctx, db, userID)
+	if err != nil {
+		return
+	}
+	if bot == nil {
+		return
+	}
+	if v, ok := pinnedStatusMessageIDs.Load(chatID); ok {
+		if msgID, ok2 := v.(int); ok2 && msgID != 0 {
+			edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
+			if _, err := bot.Request(edit); err != nil {
+				pinnedStatusMessageIDs.Delete(chatID)
+			} else {
+				return
+			}
+		}
+	}
+	// Create new status message and pin it.
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ReplyMarkup = getDriverKeyboard(db, userID)
+	sent, err := bot.Send(m)
+	if err != nil {
+		log.Printf("driver: send pinned status: %v", err)
+		return
+	}
+	pinnedStatusMessageIDs.Store(chatID, sent.MessageID)
+	pin := tgbotapi.PinChatMessageConfig{ChatID: chatID, MessageID: sent.MessageID}
+	if _, err := bot.Request(pin); err != nil {
+		log.Printf("driver: pin status message: %v", err)
+	}
+}
+
+// sendWelcomeBonusMessageIfNeeded sends the welcome bonus explanation once after registration (if not already sent).
+func sendWelcomeBonusMessageIfNeeded(bot *tgbotapi.BotAPI, db *sql.DB, chatID, userID int64) {
+	ctx := context.Background()
+	var sent int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(welcome_bonus_message_sent, 0) FROM drivers WHERE user_id = ?1`, userID).Scan(&sent); err != nil || sent != 0 {
+		return
+	}
+	if _, err := bot.Send(tgbotapi.NewMessage(chatID, welcomeBonusMessage)); err != nil {
+		log.Printf("driver: send welcome bonus message: %v", err)
+		return
+	}
+	_, _ = db.ExecContext(ctx, `UPDATE drivers SET welcome_bonus_message_sent = 1 WHERE user_id = ?1`, userID)
+}
+
+// UpdatePinnedStatusForChat updates the pinned driver status panel for the given chat (telegram user id). Called e.g. after trip finish from TripService.
+func UpdatePinnedStatusForChat(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64) {
+	ctx := context.Background()
+	var userID int64
+	if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, chatID).Scan(&userID); err != nil || userID == 0 {
+		return
+	}
+	sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 }
 
 func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchService *services.MatchService, assignmentService *services.AssignmentService, tripService *services.TripService, update tgbotapi.Update) {
@@ -388,9 +485,15 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 		return
 	}
 
-	// Application flow: phone (via share-contact button or text) -> car_type -> color -> plate
+	// Application flow: phone -> car_type -> color -> plate -> license_photo -> vehicle_doc
 	if msg.Contact != nil && handleApplicationText(bot, db, chatID, telegramID, msg.Contact.PhoneNumber) {
 		return
+	}
+	if len(msg.Photo) > 0 {
+		fileID := msg.Photo[len(msg.Photo)-1].FileID
+		if handleApplicationPhoto(bot, db, chatID, telegramID, fileID) {
+			return
+		}
 	}
 
 	// Handle keyboard button presses first so they always work (e.g. Live Location instruction even during registration).
@@ -398,7 +501,7 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 	case btnOnline, btnStartWork:
 		handleOnline(bot, db, cfg, matchService, chatID, telegramID)
 		return
-	case btnOffline:
+	case btnOffline, btnStopWork:
 		handleOffline(bot, db, chatID, telegramID)
 		return
 	case btnLiveLocation:
@@ -464,42 +567,44 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, ref
 		return
 	}
 	clearApplicationStep(ctx, db, userID)
-	// Pay 20k to referrer and notify them when this driver completed application via referral link.
-	rewardReferrerOnApplicationComplete(bot, db, userID)
-	// New driver signup bonus: 100k so'm once when they complete application (e.g. returning user who completed earlier).
-	_, _ = db.ExecContext(ctx, `UPDATE drivers SET balance = balance + 100000, signup_bonus_paid = 1 WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, userID)
-	// Application complete — show onboarding (2 steps + Ishni boshlash button).
+	// Rewards and signup bonus are paid when docs are submitted (handleApplicationPhoto). Here we only show UI for returning drivers.
+	// Application complete — show onboarding, welcome bonus message (once), and pinned status panel.
 	kb := getDriverKeyboard(db, userID)
 	m := tgbotapi.NewMessage(chatID, onboardingMessage)
 	m.ReplyMarkup = kb
 	if _, err := bot.Send(m); err != nil {
 		log.Printf("driver: send: %v", err)
 	}
+	sendWelcomeBonusMessageIfNeeded(bot, db, chatID, userID)
+	sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 }
 
 // inferApplicationStep returns the next application step and whether the application is complete.
-// Prefers drivers.application_step if present and set; otherwise infers from missing fields.
+// Registration includes: phone, car_type, color, plate, license_photo, vehicle_doc.
+// Drivers with verification_status = 'approved' (e.g. existing before doc flow) are treated as complete without doc file_ids.
 func inferApplicationStep(ctx context.Context, db *sql.DB, userID int64) (step string, complete bool) {
-	var phone, carType, color, plate sql.NullString
+	var phone, carType, color, plate, licenseFileID, vehicleFileID, verificationStatus sql.NullString
 	var appStep sql.NullString
-	err := db.QueryRowContext(ctx, `SELECT phone, car_type, color, plate, application_step FROM drivers WHERE user_id = ?1`, userID).
-		Scan(&phone, &carType, &color, &plate, &appStep)
+	err := db.QueryRowContext(ctx, `SELECT phone, car_type, color, plate, license_photo_file_id, vehicle_doc_file_id, application_step, verification_status FROM drivers WHERE user_id = ?1`, userID).
+		Scan(&phone, &carType, &color, &plate, &licenseFileID, &vehicleFileID, &appStep, &verificationStatus)
 	if err != nil {
-		// Fallback if application_step column doesn't exist yet.
-		_ = db.QueryRowContext(ctx, `SELECT phone, car_type, color, plate FROM drivers WHERE user_id = ?1`, userID).
-			Scan(&phone, &carType, &color, &plate)
+		_ = db.QueryRowContext(ctx, `SELECT phone, car_type, color, plate, application_step FROM drivers WHERE user_id = ?1`, userID).
+			Scan(&phone, &carType, &color, &plate, &appStep)
+		licenseFileID, vehicleFileID, verificationStatus = sql.NullString{}, sql.NullString{}, sql.NullString{}
 	}
 
 	missingPhone := !phone.Valid || strings.TrimSpace(phone.String) == ""
 	missingCarType := !carType.Valid || strings.TrimSpace(carType.String) == ""
 	missingColor := !color.Valid || strings.TrimSpace(color.String) == ""
 	missingPlate := !plate.Valid || strings.TrimSpace(plate.String) == ""
+	missingLicense := !licenseFileID.Valid || strings.TrimSpace(licenseFileID.String) == ""
+	missingVehicle := !vehicleFileID.Valid || strings.TrimSpace(vehicleFileID.String) == ""
+	alreadyApproved := verificationStatus.Valid && strings.TrimSpace(verificationStatus.String) == "approved"
 
-	if !missingPhone && !missingCarType && !missingColor && !missingPlate {
+	if !missingPhone && !missingCarType && !missingColor && !missingPlate && (!missingLicense && !missingVehicle || alreadyApproved) {
 		return "", true
 	}
 
-	// If application_step exists and is set, use it (unless it points to an already-filled field).
 	if appStep.Valid && strings.TrimSpace(appStep.String) != "" {
 		s := strings.TrimSpace(appStep.String)
 		switch s {
@@ -519,10 +624,17 @@ func inferApplicationStep(ctx context.Context, db *sql.DB, userID int64) (step s
 			if missingPlate {
 				return "plate", false
 			}
+		case "license_photo":
+			if missingLicense {
+				return "license_photo", false
+			}
+		case "vehicle_doc":
+			if missingVehicle {
+				return "vehicle_doc", false
+			}
 		}
 	}
 
-	// Infer from missing fields in the required order.
 	if missingPhone {
 		setApplicationStep(ctx, db, userID, "phone")
 		return "phone", false
@@ -535,8 +647,16 @@ func inferApplicationStep(ctx context.Context, db *sql.DB, userID int64) (step s
 		setApplicationStep(ctx, db, userID, "color")
 		return "color", false
 	}
-	setApplicationStep(ctx, db, userID, "plate")
-	return "plate", false
+	if missingPlate {
+		setApplicationStep(ctx, db, userID, "plate")
+		return "plate", false
+	}
+	if missingLicense {
+		setApplicationStep(ctx, db, userID, "license_photo")
+		return "license_photo", false
+	}
+	setApplicationStep(ctx, db, userID, "vehicle_doc")
+	return "vehicle_doc", false
 }
 
 func setApplicationStep(ctx context.Context, db *sql.DB, userID int64, step string) {
@@ -595,10 +715,55 @@ func sendApplicationPrompt(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, drive
 		text := "Davlat raqamingizning faqat raqam qismini yuboring.\nMasalan: 305"
 		send(bot, chatID, text)
 		return
+	case "license_photo":
+		text := "📄 Haydovchilik guvohnomasi\n\nIltimos, haydovchilik guvohnomangiz rasmini yuboring.\n\nTalablar:\n• rasm aniq bo'lsin\n• barcha ma'lumotlar ko'rinsin"
+		send(bot, chatID, text)
+		return
+	case "vehicle_doc":
+		text := "🚗 Tex pasport\n\nMashinaning tex pasporti rasmini yuboring.\n\nTalablar:\n• rasm aniq bo'lsin\n• davlat raqami ko'rinsin"
+		send(bot, chatID, text)
+		return
 	default:
 		_, _ = db.ExecContext(context.Background(), `UPDATE drivers SET application_step = ?1 WHERE user_id = ?2`, step, driverUserID)
 		send(bot, chatID, "Telefon raqamingizni yuboring.")
 	}
+}
+
+// handleApplicationPhoto handles photo uploads for license_photo and vehicle_doc steps. Returns true if the message was consumed.
+func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, fileID string) bool {
+	ctx := context.Background()
+	var userID int64
+	if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID); err != nil || userID == 0 {
+		return false
+	}
+	step, complete := inferApplicationStep(ctx, db, userID)
+	if complete || (step != "license_photo" && step != "vehicle_doc") {
+		return false
+	}
+	if step == "license_photo" {
+		_, err := db.ExecContext(ctx, `UPDATE drivers SET license_photo_file_id = ?1, application_step = 'vehicle_doc' WHERE user_id = ?2`, fileID, userID)
+		if err != nil {
+			log.Printf("driver: save license photo: %v", err)
+			return true
+		}
+		sendApplicationPrompt(bot, db, chatID, userID, "vehicle_doc")
+		return true
+	}
+	// vehicle_doc
+	_, err := db.ExecContext(ctx, `UPDATE drivers SET vehicle_doc_file_id = ?1, verification_status = 'pending', application_step = NULL WHERE user_id = ?2`, fileID, userID)
+	if err != nil {
+		log.Printf("driver: save vehicle doc: %v", err)
+		return true
+	}
+	send(bot, chatID, "✅ Hujjatlaringiz qabul qilindi.\n\nAdmin tekshiruvdan keyin siz buyurtmalar ola boshlaysiz.")
+	rewardReferrerOnApplicationComplete(bot, db, userID)
+	_, _ = db.ExecContext(ctx, `UPDATE drivers SET balance = balance + 100000, signup_bonus_paid = 1 WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, userID)
+	sendWelcomeBonusMessageIfNeeded(bot, db, chatID, userID)
+	kb := getDriverKeyboard(db, userID)
+	m := tgbotapi.NewMessage(chatID, "Tasdiqlash kutilmoqda. Holatni /status buyrug'i orqali tekshiring.")
+	m.ReplyMarkup = kb
+	_, _ = bot.Send(m)
+	return true
 }
 
 func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, text string) bool {
@@ -673,20 +838,12 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 			send(bot, chatID, "Faqat raqam yuboring. Masalan: 305")
 			return true
 		}
-		_, err = db.ExecContext(ctx, `UPDATE drivers SET plate = ?1, application_step = NULL WHERE user_id = ?2`, text, userID)
+		_, err = db.ExecContext(ctx, `UPDATE drivers SET plate = ?1, application_step = 'license_photo' WHERE user_id = ?2`, text, userID)
 		if err != nil {
 			log.Printf("driver: save plate: %v", err)
-			_, _ = db.ExecContext(ctx, `UPDATE drivers SET plate = ?1 WHERE user_id = ?2`, text, userID)
-			clearApplicationStep(ctx, db, userID)
+			_, _ = db.ExecContext(ctx, `UPDATE drivers SET plate = ?1, application_step = 'license_photo' WHERE user_id = ?2`, text, userID)
 		}
-		// Pay 20k to referrer and notify them when this driver completed application via referral link.
-		rewardReferrerOnApplicationComplete(bot, db, userID)
-		// New driver signup bonus: 100k so'm once when they complete application.
-		_, _ = db.ExecContext(ctx, `UPDATE drivers SET balance = balance + 100000, signup_bonus_paid = 1 WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, userID)
-		kb := getDriverKeyboard(db, userID)
-		m := tgbotapi.NewMessage(chatID, "Ilova qabul qilindi ✅ Endi lokatsiyangizni yuboring (Telegramda 📎 → Location).")
-		m.ReplyMarkup = kb
-		_, _ = bot.Send(m)
+		sendApplicationPrompt(bot, db, chatID, userID, "license_photo")
 	default:
 		return false
 	}
@@ -735,22 +892,15 @@ func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 		send(bot, chatID, "Xatolik.")
 		return
 	}
-	// Use online keyboard (Offline button) explicitly since we just set driver online — ensures correct keyboard even if DB read is delayed.
+	sendOrUpdatePinnedStatus(bot, db, chatID, userID)
+	// Message with keyboard and online bonus explanation.
 	kb := driverKeyboardForStatus(true)
-	var msgText string
-	if isDriverSharingLiveLocation(ctx, db, userID) {
-		msgText = "🟢 Siz onlinesiz. So'rovlar keladi."
-	} else if shouldShowOnlineNoLiveReminder(ctx, db, userID) {
-		msgText = onlineNoLiveReminderMessage
-	} else {
-		// Within cooldown: still show accurate message (never say "So'rovlar keladi" when live is off).
-		msgText = onlineNoLiveShortMessage
-	}
-	m := tgbotapi.NewMessage(chatID, msgText)
+	m := tgbotapi.NewMessage(chatID, "🟢 Siz onlinesiz.\n\n💰 Online bonus ishlayapti.\n1 soat → +2 000 so'm\n\nBugungi limit:\n20 000 so'm")
 	m.ReplyMarkup = kb
 	if _, err := bot.Send(m); err != nil {
 		log.Printf("driver: send: %v", err)
-	} else if msgText == onlineNoLiveReminderMessage {
+	}
+	if shouldShowOnlineNoLiveReminder(ctx, db, userID) {
 		nowStr := time.Now().UTC().Format("2006-01-02 15:04:05")
 		_, _ = db.ExecContext(ctx, `UPDATE drivers SET live_location_hint_last_sent_at = ?1 WHERE user_id = ?2`, nowStr, userID)
 	}
@@ -772,8 +922,9 @@ func handleOffline(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	}
 	var userID int64
 	_ = db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID)
+	sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 	kb := getDriverKeyboard(db, userID)
-	m := tgbotapi.NewMessage(chatID, offlineMessage)
+	m := tgbotapi.NewMessage(chatID, "🔴 Siz oflaynsiz.")
 	m.ReplyMarkup = kb
 	if _, err := bot.Send(m); err != nil {
 		log.Printf("driver: send: %v", err)
@@ -852,11 +1003,7 @@ func handleReferral(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) 
 		botUsername = bot.Self.UserName
 	}
 	shareLink := utils.ReferralLink(botUsername, code)
-	// Message written to the new user — when the driver forwards it, the recipient sees a direct invitation.
-	text := "🚕 YettiQanot Taxi — haydovchi sifatida ishlashingiz mumkin!\n\nSizni qo'shilishga taklif qilamiz. Boshlash uchun quyidagi havolani bosing:"
-	if shareLink != "" {
-		text += fmt.Sprintf("\n\n%s", shareLink)
-	}
+	text := "🎁 Haydovchi taklif qiling\n\nTaklif qilgan har bir haydovchi uchun\n100 000 so'm bonus olasiz\n(5 ta safar bajargandan keyin)\n\nSizning referral havolangiz:\n" + shareLink
 	kb := getDriverKeyboard(db, userID)
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ReplyMarkup = kb
@@ -953,7 +1100,7 @@ func handleLeaderboard(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int6
 	}
 }
 
-// handleStatus replies to /status with full driver state: online/offline, live location, balance.
+// handleStatus replies with the same layout as the pinned status panel.
 func handleStatus(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	ctx := context.Background()
 	var userID int64
@@ -961,24 +1108,11 @@ func handleStatus(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 		send(bot, chatID, "Avval /start bosing.")
 		return
 	}
-	var isActive int
-	var balance int64
-	var lastLiveAt sql.NullString
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(is_active, 0), COALESCE(balance, 0), last_live_location_at FROM drivers WHERE user_id = ?1`, userID).Scan(&isActive, &balance, &lastLiveAt); err != nil {
+	text, err := formatStatusPanelText(ctx, db, userID)
+	if err != nil {
 		send(bot, chatID, "Xatolik.")
 		return
 	}
-	holat := "🔴 Offline"
-	if isActive == 1 {
-		holat = "🟢 Online"
-	}
-	liveLine := "❌ Jonli lokatsiya yoqilmagan"
-	if lastLiveAt.Valid && lastLiveAt.String != "" {
-		if t, err := parseUTC(lastLiveAt.String); err == nil && time.Since(t) <= time.Duration(liveLocationActiveSeconds)*time.Second {
-			liveLine = "📡 Jonli lokatsiya yoqilgan"
-		}
-	}
-	text := fmt.Sprintf("📊 Haydovchi holati\n\nHolat: %s\nLokatsiya: %s\nBalans: %d so'm", holat, liveLine, balance)
 	kb := getDriverKeyboard(db, userID)
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ReplyMarkup = kb
@@ -1011,12 +1145,12 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		}
 		_, _ = db.ExecContext(ctx, `UPDATE drivers SET live_location_active = 0, last_live_location_at = NULL WHERE user_id = ?1`, userID)
 		log.Printf("driver: live_location end user_id=%d", userID)
-		// One-time warning: live was active and now inactive — driver must share again to receive requests.
+		sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 		kb := getDriverKeyboard(db, userID)
-		m := tgbotapi.NewMessage(chatID, liveLocationInactiveWarningMessage)
+		m := tgbotapi.NewMessage(chatID, "📍 Jonli lokatsiya o'chdi.")
 		m.ReplyMarkup = kb
 		if _, err := bot.Send(m); err != nil {
-			log.Printf("driver: send live inactive warning: %v", err)
+			log.Printf("driver: send: %v", err)
 		}
 		return
 	}
@@ -1068,12 +1202,9 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		// Still extend live window so 90s eligibility is maintained
 		_, _ = db.ExecContext(ctx, `UPDATE drivers SET live_location_active = 1, last_live_location_at = ?1 WHERE user_id = ?2`, nowStr, userID)
 	}
-	// Send confirmation only once when: fully registered, live was inactive, and this update activates live (rule 5).
+	// Update pinned panel when live becomes active (no separate confirmation message to reduce spam).
 	if !wasLiveActive {
-		kb := getDriverKeyboard(db, userID)
-		m := tgbotapi.NewMessage(chatID, liveLocationConfirmMessage)
-		m.ReplyMarkup = kb
-		_, _ = bot.Send(m)
+		sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 	}
 
 	// If driver has STARTED trip, add point (no chat message)

@@ -19,13 +19,14 @@ import (
 
 // TripService handles trip lifecycle: start, add points, finish, cancel; notifies rider and driver.
 type TripService struct {
-	db         *sql.DB
-	tripRepo   *repositories.TripRepo
-	riderBot   *tgbotapi.BotAPI
-	driverBot  *tgbotapi.BotAPI
-	cfg        *config.Config
-	hub        HubBroadcaster
-	fareSvc    *FareService // optional; if set, fare comes from DB tiered settings
+	db                   *sql.DB
+	tripRepo             *repositories.TripRepo
+	riderBot             *tgbotapi.BotAPI
+	driverBot            *tgbotapi.BotAPI
+	cfg                  *config.Config
+	hub                  HubBroadcaster
+	fareSvc              *FareService // optional; if set, fare comes from DB tiered settings
+	OnDriverStatusUpdate func(telegramID int64) // optional; e.g. update driver's pinned status panel after trip finish
 }
 
 // HubBroadcaster is the minimal interface for broadcasting trip events (optional; can be nil).
@@ -447,6 +448,9 @@ func (s *TripService) FinishTrip(ctx context.Context, tripID string, driverUserI
 		// Live-location reminder only when driver is NOT sharing live, every 3 trips, and location was not just auto-updated (e.g. mini app).
 		// Run after a short delay so mini app location update can land first; then we skip reminder if last_seen_at was recently updated.
 		go s.maybeSendLiveLocationHintAfterTripDelayed(driverUserID, driverTelegramID)
+		if s.OnDriverStatusUpdate != nil {
+			s.OnDriverStatusUpdate(driverTelegramID)
+		}
 	}
 	if s.hub != nil {
 		distanceKm := float64(distanceM) / 1000

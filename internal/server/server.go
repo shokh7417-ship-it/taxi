@@ -50,12 +50,12 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 
 	r.Static("/webapp", "./webapp")
 
-	// Admin HTTP API (dashboard, drivers, payments). Additive; does not change trip/dispatch/location logic.
+	// Admin HTTP API (dashboard, drivers, payments, driver verification). Additive; does not change trip/dispatch/location logic.
 	adminDriverRepo := repositories.NewAdminDriverRepository(db)
 	paymentRepo := repositories.NewPaymentRepository(db)
 	tripStatsRepo := repositories.NewTripStatsRepository(db)
 	adminSvc := services.NewAdminService(adminDriverRepo, paymentRepo, tripStatsRepo)
-	adminHandlers := handlers.NewAdminHandlers(adminSvc)
+	adminHandlers := handlers.NewAdminHandlers(adminSvc, driverBot)
 	adminHandlers.Register(r)
 	return r
 }

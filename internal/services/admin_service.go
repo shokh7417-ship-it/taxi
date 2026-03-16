@@ -50,17 +50,30 @@ func (s *AdminService) ListDrivers(ctx context.Context) ([]models.AdminDriverDTO
 			status = "ACTIVE"
 		}
 		out = append(out, models.AdminDriverDTO{
-			DriverID:    d.ID,
-			Name:        d.Name,
-			Phone:       d.Phone,
-			CarModel:    d.CarModel,
-			PlateNumber: d.PlateNumber,
-			Balance:     d.Balance,
-			TotalPaid:   d.TotalPaid,
-			Status:      status,
+			DriverID:           d.ID,
+			Name:               d.Name,
+			Phone:              d.Phone,
+			CarModel:           d.CarModel,
+			PlateNumber:        d.PlateNumber,
+			Balance:            d.Balance,
+			TotalPaid:          d.TotalPaid,
+			Status:             status,
+			VerificationStatus: d.VerificationStatus,
 		})
 	}
 	return out, nil
+}
+
+// SetDriverVerification sets verification_status to "approved" or "rejected". Returns the driver's Telegram ID for notification.
+func (s *AdminService) SetDriverVerification(ctx context.Context, driverUserID int64, status string) (telegramID int64, err error) {
+	if status != "approved" && status != "rejected" {
+		return 0, nil
+	}
+	if err := s.drivers.UpdateVerificationStatus(ctx, driverUserID, status); err != nil {
+		return 0, err
+	}
+	telegramID, err = s.drivers.GetDriverTelegramID(ctx, driverUserID)
+	return telegramID, err
 }
 
 // AddDriverBalance records a positive deposit to a driver's balance.

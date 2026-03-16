@@ -13,6 +13,8 @@ type AdminDriverRepository interface {
 	GetDriverByID(ctx context.Context, id int64) (*models.Driver, error)
 	UpdateDriverBalance(ctx context.Context, id int64, delta int64, countPaid bool) error
 	SetDriverBalance(ctx context.Context, id int64, newBalance int64) error
+	UpdateVerificationStatus(ctx context.Context, driverUserID int64, status string) error
+	GetDriverTelegramID(ctx context.Context, driverUserID int64) (int64, error)
 }
 
 type adminDriverRepo struct {
@@ -24,7 +26,7 @@ func NewAdminDriverRepository(db *sql.DB) AdminDriverRepository {
 	return &adminDriverRepo{db: db}
 }
 
-// ListDriversWithBalance returns drivers ordered by user_id DESC with balance and total_paid.
+// ListDriversWithBalance returns drivers ordered by user_id DESC with balance, total_paid, and verification_status.
 func (r *adminDriverRepo) ListDriversWithBalance(ctx context.Context) ([]models.Driver, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT u.id AS id,
@@ -33,7 +35,8 @@ func (r *adminDriverRepo) ListDriversWithBalance(ctx context.Context) ([]models.
 		       COALESCE(d.car_type, '') AS car_model,
 		       COALESCE(d.plate, '') AS plate_number,
 		       d.balance,
-		       d.total_paid
+		       d.total_paid,
+		       COALESCE(d.verification_status, '') AS verification_status
 		FROM drivers d
 		JOIN users u ON u.id = d.user_id
 		ORDER BY d.user_id DESC`)
@@ -45,7 +48,7 @@ func (r *adminDriverRepo) ListDriversWithBalance(ctx context.Context) ([]models.
 	var out []models.Driver
 	for rows.Next() {
 		var d models.Driver
-		if err := rows.Scan(&d.ID, &d.Name, &d.Phone, &d.CarModel, &d.PlateNumber, &d.Balance, &d.TotalPaid); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.Phone, &d.CarModel, &d.PlateNumber, &d.Balance, &d.TotalPaid, &d.VerificationStatus); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -65,12 +68,13 @@ func (r *adminDriverRepo) GetDriverByID(ctx context.Context, id int64) (*models.
 		       COALESCE(d.car_type, '') AS car_model,
 		       COALESCE(d.plate, '') AS plate_number,
 		       d.balance,
-		       d.total_paid
+		       d.total_paid,
+		       COALESCE(d.verification_status, '') AS verification_status
 		FROM drivers d
 		JOIN users u ON u.id = d.user_id
 		WHERE d.user_id = ?1`, id)
 	var d models.Driver
-	if err := row.Scan(&d.ID, &d.Name, &d.Phone, &d.CarModel, &d.PlateNumber, &d.Balance, &d.TotalPaid); err != nil {
+	if err := row.Scan(&d.ID, &d.Name, &d.Phone, &d.CarModel, &d.PlateNumber, &d.Balance, &d.TotalPaid, &d.VerificationStatus); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -120,5 +124,23 @@ func (r *adminDriverRepo) SetDriverBalance(ctx context.Context, id int64, newBal
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE drivers SET balance = ?1, is_active = ?2 WHERE user_id = ?3`, newBalance, active, id)
 	return err
+}
+
+// UpdateVerificationStatus sets verification_status. For "rejected", also clears document file_ids and sets application_step to restart doc upload.
+func (r *adminDriverRepo) UpdateVerificationStatus(ctx context.Context, driverUserID int64, status string) error {
+	if status == "rejected" {
+		_, err := r.db.ExecContext(ctx, `
+			UPDATE drivers SET verification_status = 'rejected', license_photo_file_id = NULL, vehicle_doc_file_id = NULL, application_step = 'license_photo' WHERE user_id = ?1`, driverUserID)
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE drivers SET verification_status = ?1 WHERE user_id = ?2`, status, driverUserID)
+	return err
+}
+
+// GetDriverTelegramID returns the Telegram user id for the driver (users.telegram_id).
+func (r *adminDriverRepo) GetDriverTelegramID(ctx context.Context, driverUserID int64) (int64, error) {
+	var telegramID int64
+	err := r.db.QueryRowContext(ctx, `SELECT u.telegram_id FROM users u JOIN drivers d ON d.user_id = u.id WHERE d.user_id = ?1`, driverUserID).Scan(&telegramID)
+	return telegramID, err
 }
 

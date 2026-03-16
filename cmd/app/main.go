@@ -58,6 +58,9 @@ func main() {
 	tripRepo := repositories.NewTripRepo(database)
 	fareSvc := services.NewFareService(database, cfg)
 	tripSvc := services.NewTripService(database, tripRepo, riderBot, driverBot, cfg, hub, fareSvc)
+	tripSvc.OnDriverStatusUpdate = func(telegramID int64) {
+		driverbot.UpdatePinnedStatusForChat(driverBot, database, telegramID)
+	}
 
 	// On each process start (deployment/restart), send a one-time notification to all drivers
 	// so they know the system was updated and should go online again.
@@ -76,6 +79,7 @@ func main() {
 
 	go assignSvc.RunExpiryWorker(ctx)
 	go assignSvc.RunRadiusExpansionWorker(ctx, matchSvc)
+	go services.RunOnlineBonusWorker(ctx, database, driverBot)
 
 	srv := server.New(database, cfg, tripSvc, matchSvc, driverBot, riderBot, hub, fareSvc)
 	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: srv}
