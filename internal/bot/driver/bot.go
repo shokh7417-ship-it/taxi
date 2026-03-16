@@ -103,6 +103,30 @@ func isDigitsOnly(s string) bool {
 	return true
 }
 
+func getUserLang(ctx context.Context, db *sql.DB, telegramID int64) string {
+	var lang sql.NullString
+	_ = db.QueryRowContext(ctx, `SELECT lang FROM users WHERE telegram_id = ?1`, telegramID).Scan(&lang)
+	if !lang.Valid || lang.String == "" {
+		return ""
+	}
+	return strings.TrimSpace(lang.String)
+}
+
+func sendAlphabetMenu(bot *tgbotapi.BotAPI, chatID int64) {
+	text := "Алифбони танланг / Alifboni tanlang"
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔤 Кирил", "lang_cyrl"),
+			tgbotapi.NewInlineKeyboardButtonData("🔤 Lotin", "lang_latn"),
+		),
+	)
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ReplyMarkup = kb
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("driver: send alphabet menu: %v", err)
+	}
+}
+
 // isDriverBalanceSufficient returns true if the driver is eligible for dispatch (balance > 0, or when InfiniteDriverBalance is true).
 func isDriverBalanceSufficient(ctx context.Context, db *sql.DB, driverUserID int64, cfg *config.Config) bool {
 	if cfg != nil && cfg.InfiniteDriverBalance {
@@ -492,6 +516,13 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 	cmd := msg.Command()
 	switch cmd {
 	case "start":
+		ctx := context.Background()
+		lang := getUserLang(ctx, db, telegramID)
+		if lang == "" {
+			// Ask for alphabet first, then /start will be re-run after selection.
+			sendAlphabetMenu(bot, chatID)
+			return
+		}
 		var referredBy *string
 		if parts := strings.Fields(msg.Text); len(parts) > 1 && parts[1] != "" {
 			if code := strings.TrimPrefix(parts[1], "ref_"); code != "" {
@@ -511,6 +542,9 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 		return
 	case "leaderboard":
 		handleLeaderboard(bot, db, chatID, telegramID)
+		return
+	case "alphabet":
+		sendAlphabetMenu(bot, chatID)
 		return
 	case "online":
 		handleOnline(bot, db, cfg, matchService, chatID, telegramID)
@@ -1465,6 +1499,28 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, assign
 	chatID := q.Message.Chat.ID
 	telegramID := q.From.ID
 	data := q.Data
+
+	if data == "lang_cyrl" || data == "lang_latn" {
+		ctx := context.Background()
+		newLang := "cyrl"
+		if data == "lang_latn" {
+			newLang = "latn"
+		}
+		_, _ = db.ExecContext(ctx, `UPDATE users SET lang = ?1 WHERE telegram_id = ?2`, newLang, telegramID)
+		confirm := "✅ Кирилл алифбоси танланди."
+		if newLang == "latn" {
+			confirm = "✅ Lotin alifbosi tanlandi."
+		}
+		if _, err := bot.Send(tgbotapi.NewMessage(chatID, confirm)); err != nil {
+			log.Printf("driver: send alphabet confirmation: %v", err)
+		}
+		// Continue normal /start flow after language selection.
+		handleStart(bot, db, chatID, telegramID, nil)
+		if q.ID != "" {
+			bot.Request(tgbotapi.NewCallback(q.ID, ""))
+		}
+		return
+	}
 
 	if strings.HasPrefix(data, cbAccept) {
 		requestID := strings.TrimPrefix(data, cbAccept)
