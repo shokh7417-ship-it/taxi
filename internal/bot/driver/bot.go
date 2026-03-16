@@ -276,7 +276,10 @@ func handleLiveLocationInstruction(bot *tgbotapi.BotAPI, db *sql.DB, chatID, tel
 	_ = db.QueryRowContext(ctx, `SELECT verification_status FROM drivers WHERE user_id = ?1`, userID).Scan(&verificationStatus)
 	if !verificationStatus.Valid || strings.TrimSpace(verificationStatus.String) != "approved" {
 		kb := driverKeyboardForVerificationPending()
-		m := tgbotapi.NewMessage(chatID, "Tasdiqlash kutilmoqda. Admin profilingizni tekshirmoqda.")
+		m := tgbotapi.NewMessage(chatID, utils.Tr(lang,
+			"Tasdiqlash kutilmoqda. Admin profilingizni tekshirmoqda.",
+			"Тасдиқлаш кутилмоқда. Админ профилингизни текширмоқда.",
+		))
 		m.ReplyMarkup = kb
 		if _, err := bot.Send(m); err != nil {
 			log.Printf("driver: send pending verification live-location message: %v", err)
@@ -326,9 +329,11 @@ func sendOnOnlineLiveLocationInstruction(bot *tgbotapi.BotAPI, db *sql.DB, chatI
 func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotAPI, matchService *services.MatchService, assignmentService *services.AssignmentService, tripService *services.TripService) error {
 	log.Printf("driver bot: started @%s", bot.Self.UserName)
 
-	// Set command panel: /start, /status, /bonuslar, /referral, /leaderboard (online/offline via buttons only).
+	// Set command panel (global, Latin descriptions):
+	// /start, /alphabet, /status, /bonuslar, /referral, /leaderboard (online/offline via buttons only).
 	driverCommands := tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "Botni boshlash"},
+		tgbotapi.BotCommand{Command: "alphabet", Description: "Alifboni tanlash"},
 		tgbotapi.BotCommand{Command: "status", Description: "Holat va balans"},
 		tgbotapi.BotCommand{Command: "bonuslar", Description: "Bonuslar va referral statistikasi"},
 		tgbotapi.BotCommand{Command: "referral", Description: "Do'stlarni taklif qilish"},
@@ -358,6 +363,8 @@ func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotA
 
 // driverKeyboardForStatus returns main control panel: offline [Ishni boshlash, Jonli lokatsiya yoqish], online [Ishni to'xtatish, Jonli lokatsiya yoqish].
 func driverKeyboardForStatus(isOnline bool) tgbotapi.ReplyKeyboardMarkup {
+	// Note: driverKeyboardForStatus is used when we don't know telegramID/lang;
+	// buttons themselves are emojis + short text, kept in Latin to avoid DB lookups here.
 	var row []tgbotapi.KeyboardButton
 	if isOnline {
 		row = append(row, tgbotapi.NewKeyboardButton(btnStopWork), tgbotapi.NewKeyboardButton(btnLiveLocation))
@@ -1011,7 +1018,10 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 	_, _ = db.ExecContext(ctx, `UPDATE drivers SET balance = balance + 100000, signup_bonus_paid = 1 WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, userID)
 	sendWelcomeBonusMessageIfNeeded(bot, db, chatID, userID)
 	kb := getDriverKeyboard(db, userID)
-	m := tgbotapi.NewMessage(chatID, "Tasdiqlash kutilmoqda. Holatni /status buyrug'i orqali tekshiring.")
+	m := tgbotapi.NewMessage(chatID, utils.Tr(lang,
+		"Tasdiqlash kutilmoqda. Holatni /status buyrug'i orqali tekshiring.",
+		"Тасдиқлаш кутилмоқда. Ҳолатни /status буйруғи орқали текширинг.",
+	))
 	m.ReplyMarkup = kb
 	_, _ = bot.Send(m)
 	return true
@@ -1435,6 +1445,7 @@ func handleRequestLocation(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 // If loc.LivePeriod <= 0 when from edited_message, treats as live end: sets live_location_active = 0 and returns.
 func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchService *services.MatchService, tripService *services.TripService, chatID, telegramID int64, loc *tgbotapi.Location, updateTime time.Time) {
 	ctx := context.Background()
+	lang := getUserLang(ctx, db, telegramID)
 	// Live end: edited_message with location.live_period null/0 — stop accepting updates and clear live state; send one-time warning.
 	if loc != nil && loc.LivePeriod <= 0 {
 		var userID int64
@@ -1445,7 +1456,10 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		log.Printf("driver: live_location end user_id=%d", userID)
 		sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 		kb := getDriverKeyboard(db, userID)
-		m := tgbotapi.NewMessage(chatID, "📍 Jonli lokatsiya o'chdi.")
+		m := tgbotapi.NewMessage(chatID, utils.Tr(lang,
+			"📍 Jonli lokatsiya o'chdi.",
+			"📍 Жонли локация ўчди.",
+		))
 		m.ReplyMarkup = kb
 		if _, err := bot.Send(m); err != nil {
 			log.Printf("driver: send: %v", err)
@@ -1662,7 +1676,11 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, assign
 			if err := db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, driverUserID).Scan(&driverTgID); err != nil || driverTgID == 0 {
 				return
 			}
-			msg := tgbotapi.NewMessage(driverTgID, "🎉 Profilingiz tasdiqlandi!\n\nEndi siz buyurtmalar qabul qilishingiz mumkin.\n\n🟢 Ishni boshlash\n📡 Jonli lokatsiyani yoqing")
+			lang := getUserLang(ctx, db, driverTgID)
+			msg := tgbotapi.NewMessage(driverTgID, utils.Tr(lang,
+				"🎉 Profilingiz tasdiqlandi!\n\nEndi siz buyurtmalar qabul qilishingiz mumkin.\n\n🟢 Ishni boshlash\n📡 Jonli lokatsiyani yoqing",
+				"🎉 Профилингиз тасдиқланди!\n\nЭнди сиз буюртмалар қабул қилишингиз мумкин.\n\n🟢 Ишни бошлаш\n📡 Жонли локацияни ёқиш",
+			))
 			if _, err := bot.Send(msg); err != nil {
 				log.Printf("driver: notify approved driver send error user_id=%d: %v", driverUserID, err)
 				return
@@ -1675,7 +1693,11 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, assign
 				log.Printf("driver: driver rejected by admin user_id=%d", driverUserID)
 				var driverTgID int64
 				if err := db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, driverUserID).Scan(&driverTgID); err == nil && driverTgID != 0 {
-					msg := tgbotapi.NewMessage(driverTgID, "❌ Hujjatlaringiz tasdiqlanmadi.\nIltimos, aniqroq rasm yuboring.")
+					lang := getUserLang(ctx, db, driverTgID)
+					msg := tgbotapi.NewMessage(driverTgID, utils.Tr(lang,
+						"❌ Hujjatlaringiz tasdiqlanmadi.\nIltimos, aniqroq rasm yuboring.",
+						"❌ Ҳужжатларингиз тасдиқланмади.\nИлтимос, аниқроқ расм юборинг.",
+					))
 					if _, err := bot.Send(msg); err != nil {
 						log.Printf("driver: notify rejected driver send error user_id=%d: %v", driverUserID, err)
 					}
