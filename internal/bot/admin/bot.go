@@ -53,8 +53,8 @@ func (s *fareEditState) clear(telegramID int64) {
 	delete(s.field, telegramID)
 }
 
-// Run starts the admin bot. Only cfg.AdminID can use fare menu. If AdminBotToken is empty, do not call Run.
-func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotAPI, fareSvc *services.FareService) error {
+// Run starts the admin bot. driverBot is used to send messages to drivers (approval/reject); admin bot must not message drivers (chat not found).
+func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotAPI, fareSvc *services.FareService, driverBot *tgbotapi.BotAPI) error {
 	if cfg == nil || cfg.AdminID == 0 || fareSvc == nil {
 		return nil
 	}
@@ -69,15 +69,15 @@ func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotA
 			if !ok {
 				return nil
 			}
-			handleUpdate(bot, cfg, db, fareSvc, state, update)
+			handleUpdate(bot, cfg, db, fareSvc, driverBot, state, update)
 		}
 	}
 }
 
-func handleUpdate(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB, fareSvc *services.FareService, state *fareEditState, update tgbotapi.Update) {
+func handleUpdate(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB, fareSvc *services.FareService, driverBot *tgbotapi.BotAPI, state *fareEditState, update tgbotapi.Update) {
 	// Handle callback queries (approve/reject driver verification) first.
 	if update.CallbackQuery != nil {
-		handleApprovalCallback(bot, cfg, db, update.CallbackQuery)
+		handleApprovalCallback(bot, cfg, db, driverBot, update.CallbackQuery)
 		return
 	}
 	var chatID int64
@@ -141,7 +141,7 @@ func handleUpdate(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB, fareSvc 
 	}
 }
 
-func handleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB, q *tgbotapi.CallbackQuery) {
+func handleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB, driverBot *tgbotapi.BotAPI, q *tgbotapi.CallbackQuery) {
 	if bot == nil || cfg == nil || db == nil || q == nil {
 		return
 	}
@@ -190,15 +190,8 @@ func handleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB
 			log.Printf("admin bot: approve driver update error user_id=%d: %v", driverUserID, err)
 			return
 		}
-		// Notify driver once.
-		if driverTgID != 0 && approvalNotified == 0 {
-			msg := tgbotapi.NewMessage(driverTgID, "🎉 Profilingiz tasdiqlandi!\n\nEndi siz buyurtmalar qabul qilishingiz mumkin.\n\n🟢 Ishni boshlash\n📡 Jonli lokatsiyani yoqing")
-			if _, err := bot.Send(msg); err != nil {
-				log.Printf("admin bot: notify approved driver send error user_id=%d: %v", driverUserID, err)
-				return
-			}
-			_, _ = db.ExecContext(ctx, `UPDATE drivers SET approval_notified = 1 WHERE user_id = ?1`, driverUserID)
-		}
+		// Do not send to driver from admin bot (driver has no chat with admin bot → "chat not found").
+		// Driver approval notifier sends approval + bonus + keyboard via driver bot.
 
 		// Update admin message to show success and remove buttons.
 		if q.Message != nil {
@@ -231,10 +224,10 @@ func handleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB
 		log.Printf("admin bot: reject driver update error user_id=%d: %v", driverUserID, err)
 		return
 	}
-	if driverTgID != 0 {
+	if driverTgID != 0 && driverBot != nil {
 		rej := tgbotapi.NewMessage(driverTgID, "❌ Hujjatlaringiz tasdiqlanmadi.\nIltimos, aniqroq rasm yuboring.")
-		if _, err := bot.Send(rej); err != nil {
-			log.Printf("admin bot: notify rejected driver send error user_id=%d: %v", driverUserID, err)
+		if _, err := driverBot.Send(rej); err != nil {
+			log.Printf("admin bot: notify rejected driver via driver bot send error user_id=%d: %v", driverUserID, err)
 		}
 	}
 
