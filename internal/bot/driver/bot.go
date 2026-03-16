@@ -350,7 +350,15 @@ func driverKeyboardForStatus(isOnline bool) tgbotapi.ReplyKeyboardMarkup {
 func getDriverKeyboard(db *sql.DB, driverUserID int64) tgbotapi.ReplyKeyboardMarkup {
 	ctx := context.Background()
 	var isActive int
-	_ = db.QueryRowContext(ctx, `SELECT COALESCE(is_active, 0) FROM drivers WHERE user_id = ?1`, driverUserID).Scan(&isActive)
+	var verificationStatus sql.NullString
+	_ = db.QueryRowContext(ctx, `SELECT COALESCE(is_active, 0), verification_status FROM drivers WHERE user_id = ?1`, driverUserID).
+		Scan(&isActive, &verificationStatus)
+
+	// Agar haydovchi hali tasdiqlanmagan bo'lsa, faqat "⏳ Tasdiqlash kutilmoqda" tugmasi ko'rinadi.
+	if !verificationStatus.Valid || strings.TrimSpace(verificationStatus.String) != "approved" {
+		return driverKeyboardForVerificationPending()
+	}
+
 	return driverKeyboardForStatus(isActive == 1)
 }
 
