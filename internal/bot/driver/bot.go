@@ -1407,9 +1407,19 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		// Still extend live window so 90s eligibility is maintained
 		_, _ = db.ExecContext(ctx, `UPDATE drivers SET live_location_active = 1, last_live_location_at = ?1 WHERE user_id = ?2`, nowStr, userID)
 	}
-	// Update pinned panel when live becomes active (no separate confirmation message to reduce spam).
+	// Update pinned panel when live becomes active and also show the current
+	// status card once so the driver clearly sees the new state.
 	if !wasLiveActive {
 		sendOrUpdatePinnedStatus(bot, db, chatID, userID)
+		text, err := formatStatusPanelText(ctx, db, userID)
+		if err == nil {
+			kb := getDriverKeyboard(db, userID)
+			m := tgbotapi.NewMessage(chatID, text)
+			m.ReplyMarkup = kb
+			if _, err := bot.Send(m); err != nil {
+				log.Printf("driver: send live status card: %v", err)
+			}
+		}
 	}
 
 	// If driver has STARTED trip, add point (no chat message)
