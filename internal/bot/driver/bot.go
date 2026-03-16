@@ -106,8 +106,8 @@ func isDigitsOnly(s string) bool {
 func getUserLang(ctx context.Context, db *sql.DB, telegramID int64) string {
 	var lang sql.NullString
 	_ = db.QueryRowContext(ctx, `SELECT lang FROM users WHERE telegram_id = ?1`, telegramID).Scan(&lang)
-	if !lang.Valid || lang.String == "" {
-		return ""
+	if !lang.Valid || strings.TrimSpace(lang.String) == "" {
+		return "latn"
 	}
 	return strings.TrimSpace(lang.String)
 }
@@ -263,9 +263,13 @@ const liveLocationButtonInstructionCooldownMin = 3
 // handleLiveLocationInstruction runs when the driver presses "📡 Jonli lokatsiya yoqish". If already sharing live, ignore. Else send instruction once per cooldown to avoid spam.
 func handleLiveLocationInstruction(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	ctx := context.Background()
+	lang := getUserLang(ctx, db, telegramID)
 	var userID int64
 	if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID); err != nil || userID == 0 {
-		send(bot, chatID, "Xatolik.")
+		send(bot, chatID, utils.Tr(lang,
+			"Xatolik.",
+			"Хатолик.",
+		))
 		return
 	}
 	var verificationStatus sql.NullString
@@ -591,10 +595,14 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 
 func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, referredBy *string) {
 	ctx := context.Background()
+	lang := getUserLang(ctx, db, telegramID)
 	code, err := utils.GenerateReferralCode(ctx, db)
 	if err != nil {
 		log.Printf("driver: generate referral code: %v", err)
-		send(bot, chatID, "Xatolik. Qayta urinib ko'ring.")
+		send(bot, chatID, utils.Tr(lang,
+			"Xatolik. Qayta urinib ko'ring.",
+			"Хатолик. Қайта уриниб кўринг.",
+		))
 		return
 	}
 	var refArg interface{}
@@ -612,7 +620,10 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, ref
 		telegramID, domain.RoleDriver, code, refArg).Scan(&userID)
 	if err != nil {
 		log.Printf("driver: upsert user: %v", err)
-		send(bot, chatID, "Xatolik. Qayta urinib ko'ring.")
+		send(bot, chatID, utils.Tr(lang,
+			"Xatolik. Qayta urinib ko'ring.",
+			"Хатолик. Қайта уриниб кўринг.",
+		))
 		return
 	}
 	// Driver referral: no reward on registration; full reward only after referred driver completes 5 trips and is active with live location (see trip_service FinishTrip).
@@ -631,7 +642,10 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, ref
 		if step == "phone" {
 			sendApplicationPrompt(bot, db, chatID, userID, step)
 		} else {
-			send(bot, chatID, "Ilovani to'ldiring. Keyingi savolga javob yuboring.")
+			send(bot, chatID, utils.Tr(lang,
+				"Ilovani to'ldiring. Keyingi savolga javob yuboring.",
+				"Иловани тўлдиринг. Кейинги саволга жавоб юборинг.",
+			))
 		}
 		return
 	}
@@ -758,9 +772,16 @@ func clearApplicationStep(ctx context.Context, db *sql.DB, userID int64) {
 // sendApplicationPrompt sends the next question for the driver application (phone -> first_name -> last_name -> car_type -> color -> plate).
 // For the phone step, shows a "Share number" button; for car_type/color, shows button keyboards.
 func sendApplicationPrompt(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, driverUserID int64, step string) {
+	ctx := context.Background()
+	var telegramID int64
+	_ = db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, driverUserID).Scan(&telegramID)
+	lang := getUserLang(ctx, db, telegramID)
 	switch step {
 	case "phone":
-		text := "Ilovani to'ldiring. Telefon raqamingizni yuboring (tugmani bosing yoki yozing)."
+		text := utils.Tr(lang,
+			"Ilovani to'ldiring. Telefon raqamingizni yuboring (tugmani bosing yoki yozing).",
+			"Иловани тўлдиринг. Телефон рақамингизни юборинг (тугмани босинг ёки ёзинг).",
+		)
 		kb := tgbotapi.NewReplyKeyboard(
 			tgbotapi.NewKeyboardButtonRow(
 				tgbotapi.NewKeyboardButtonContact("📞 Telefon raqamini yuborish"),
@@ -775,13 +796,22 @@ func sendApplicationPrompt(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, drive
 		}
 		return
 	case "first_name":
-		send(bot, chatID, "Ismingizni kiriting")
+		send(bot, chatID, utils.Tr(lang,
+			"Ismingizni kiriting",
+			"Исмингизни киритинг",
+		))
 		return
 	case "last_name":
-		send(bot, chatID, "Familyangizni kiriting")
+		send(bot, chatID, utils.Tr(lang,
+			"Familyangizni kiriting",
+			"Фамилянгизни киритинг",
+		))
 		return
 	case "car_type":
-		text := "Mashina turini tanlang yoki «Boshqa» bosing va yozing."
+		text := utils.Tr(lang,
+			"Mashina turini tanlang yoki «Boshqa» bosing va yozing.",
+			"Машина турини танланг ёки «Бошқа» тугмасини босиб ёзинг.",
+		)
 		kb := carTypeKeyboard()
 		m := tgbotapi.NewMessage(chatID, text)
 		m.ReplyMarkup = kb
@@ -790,10 +820,16 @@ func sendApplicationPrompt(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, drive
 		}
 		return
 	case "car_type_manual":
-		send(bot, chatID, "Mashina modelini yozing.")
+		send(bot, chatID, utils.Tr(lang,
+			"Mashina modelini yozing.",
+			"Машина моделини ёзинг.",
+		))
 		return
 	case "color":
-		text := "Mashina rangini tanlang yoki «Boshqa» bosing va yozing."
+		text := utils.Tr(lang,
+			"Mashina rangini tanlang yoki «Boshqa» bosing va yozing.",
+			"Машина ранги ни танланг ёки «Бошқа» тугмасини босиб ёзинг.",
+		)
 		kb := colorKeyboard()
 		m := tgbotapi.NewMessage(chatID, text)
 		m.ReplyMarkup = kb
@@ -802,18 +838,30 @@ func sendApplicationPrompt(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, drive
 		}
 		return
 	case "color_manual":
-		send(bot, chatID, "Mashina rangini yozing.")
+		send(bot, chatID, utils.Tr(lang,
+			"Mashina rangini yozing.",
+			"Машина ранги ни ёзинг.",
+		))
 		return
 	case "plate":
-		text := "🚘 Davlat raqamingizni to‘liq kiriting\n\nMasalan: 20N306ZB"
+		text := utils.Tr(lang,
+			"🚘 Davlat raqamingizni to‘liq kiriting\n\nMasalan: 20N306ZB",
+			"🚘 Давлат рақамингизни тўлиқ киритинг\n\nМасалан: 20N306ZB",
+		)
 		send(bot, chatID, text)
 		return
 	case "license_photo":
-		text := "📄 Haydovchilik guvohnomasi\n\nIltimos, haydovchilik guvohnomangiz rasmini yuboring.\n\nTalablar:\n• rasm aniq bo'lsin\n• barcha ma'lumotlar ko'rinsin"
+		text := utils.Tr(lang,
+			"📄 Haydovchilik guvohnomasi\n\nIltimos, haydovchilik guvohnomangiz rasmini yuboring.\n\nTalablar:\n• rasm aniq bo'lsin\n• barcha ma'lumotlar ko'rinsin",
+			"📄 Ҳайдовчилик гувоҳномаси\n\nИлтимос, ҳайдовчилик гувоҳномангиз расмини юборинг.\n\nТалаблар:\n• расм аниқ бўлсин\n• барча маълумотлар кўринсин",
+		)
 		send(bot, chatID, text)
 		return
 	case "vehicle_doc":
-		text := "🚗 Tex pasport\n\nMashinaning tex pasporti rasmini yuboring.\n\nTalablar:\n• rasm aniq bo'lsin\n• davlat raqami ko'rinsin"
+		text := utils.Tr(lang,
+			"🚗 Tex pasport\n\nMashinaning tex pasporti rasmini yuboring.\n\nTalablar:\n• rasm aniq bo'lsin\n• davlat raqami ko'rinsin",
+			"🚗 Тех паспорт\n\nМашинанинг тех паспорти расмини юборинг.\n\nТалаблар:\n• расм аниқ бўлсин\n• давлат рақами кўринсин",
+		)
 		send(bot, chatID, text)
 		return
 	default:
@@ -825,6 +873,7 @@ func sendApplicationPrompt(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, drive
 // handleApplicationPhoto handles photo uploads for license_photo and vehicle_doc steps. Returns true if the message was consumed.
 func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, chatID, telegramID int64, fileID string) bool {
 	ctx := context.Background()
+	lang := getUserLang(ctx, db, telegramID)
 	var userID int64
 	if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID); err != nil || userID == 0 {
 		return false
@@ -953,7 +1002,10 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 	}
 
 	// Notify driver.
-	send(bot, chatID, "✅ Ma’lumotlaringiz qabul qilindi.\nAdmin tasdiqlashidan so‘ng sizga xabar beriladi.")
+		send(bot, chatID, utils.Tr(lang,
+			"✅ Ma’lumotlaringiz qabul qilindi.\nAdmin tasdiqlashidan so‘ng sizga xabar beriladi.",
+			"✅ Маълумотларингиз қабул қилинди.\nАдмин тасдиқлаганидан сўнг сизга хабар берилади.",
+		))
 	rewardReferrerOnApplicationComplete(bot, db, userID)
 	_, _ = db.ExecContext(ctx, `UPDATE drivers SET balance = balance + 100000, signup_bonus_paid = 1 WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, userID)
 	sendWelcomeBonusMessageIfNeeded(bot, db, chatID, userID)
@@ -970,6 +1022,7 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 	if text == "" {
 		return false
 	}
+	lang := getUserLang(ctx, db, telegramID)
 	var userID int64
 	err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID)
 	if err != nil || userID == 0 {
@@ -988,7 +1041,10 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 		var otherUserID int64
 		err := db.QueryRowContext(ctx, `SELECT user_id FROM drivers WHERE phone = ?1 AND user_id != ?2 LIMIT 1`, text, userID).Scan(&otherUserID)
 		if err == nil {
-			send(bot, chatID, "Bu telefon raqami allaqachon ro'yxatdan o'tgan. Boshqa raqamdan foydalaning.")
+			send(bot, chatID, utils.Tr(lang,
+				"Bu telefon raqami allaqachon ro'yxatdan o'tgan. Boshqa raqamdan foydalaning.",
+				"Бу телефон рақами аввалоқ рўйхатдан ўтган. Бошқа рақамдан фойдаланинг.",
+			))
 			return true
 		}
 		_, err = db.ExecContext(ctx, `UPDATE drivers SET phone = ?1, application_step = 'first_name' WHERE user_id = ?2`, text, userID)
@@ -1014,7 +1070,10 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 	case "car_type":
 		if text == carTypeBoshqa {
 			_, _ = db.ExecContext(ctx, `UPDATE drivers SET application_step = ?1 WHERE user_id = ?2`, "car_type_manual", userID)
-			send(bot, chatID, "Mashina modelini yozing.")
+			send(bot, chatID, utils.Tr(lang,
+				"Mashina modelini yozing.",
+				"Машина моделини ёзинг.",
+			))
 		} else {
 			_, err = db.ExecContext(ctx, `UPDATE drivers SET car_type = ?1, application_step = 'color' WHERE user_id = ?2`, text, userID)
 			if err != nil {
@@ -1031,7 +1090,10 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 	case "color":
 		if text == "Boshqa" {
 			_, _ = db.ExecContext(ctx, `UPDATE drivers SET application_step = ?1 WHERE user_id = ?2`, "color_manual", userID)
-			send(bot, chatID, "Mashina rangini yozing.")
+			send(bot, chatID, utils.Tr(lang,
+				"Mashina rangini yozing.",
+				"Машина ранги ни ёзинг.",
+			))
 		} else {
 			_, err = db.ExecContext(ctx, `UPDATE drivers SET color = ?1, application_step = 'plate' WHERE user_id = ?2`, text, userID)
 			if err != nil {
@@ -1049,7 +1111,10 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 		plate := strings.ToUpper(strings.TrimSpace(text))
 		matched, _ := regexp.MatchString(`^[0-9]{2}[A-Z]{1}[0-9]{3}[A-Z]{2}$`, plate)
 		if !matched {
-			send(bot, chatID, "❌ Noto‘g‘ri raqam formati.\n\nTo‘g‘ri format: 20N306ZB\nIltimos, davlat raqamini to‘liq kiriting.")
+			send(bot, chatID, utils.Tr(lang,
+				"❌ Noto‘g‘ri raqam formati.\n\nTo‘g‘ri format: 20N306ZB\nIltimos, davlat raqamini to‘liq kiriting.",
+				"❌ Нотоғри рақам формати.\n\nТўғри формат: 20N306ZB\nИлтимос, давлат рақамини тўлиқ киритинг.",
+			))
 			return true
 		}
 		log.Printf("driver: plate validated user_id=%d plate=%s", userID, plate)
@@ -1067,6 +1132,7 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 
 func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchService *services.MatchService, chatID, telegramID int64) {
 	ctx := context.Background()
+	lang := getUserLang(ctx, db, telegramID)
 	// Require driver application (phone, car type, color, plate) and location
 	var phone, carType, color, plate sql.NullString
 	var lastLat, lastLng sql.NullFloat64
@@ -1075,7 +1141,10 @@ func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 		FROM drivers d JOIN users u ON u.id = d.user_id WHERE u.telegram_id = ?1`,
 		telegramID).Scan(&phone, &carType, &color, &plate, &lastLat, &lastLng)
 	if !phone.Valid || phone.String == "" || !carType.Valid || carType.String == "" || !color.Valid || color.String == "" || !plate.Valid || plate.String == "" {
-		send(bot, chatID, "Avval ilovani to'ldiring: /start bosing va telefon, mashina turi, rangi, davlat raqamini yuboring.")
+		send(bot, chatID, utils.Tr(lang,
+			"Avval ilovani to'ldiring: /start bosing va telefon, mashina turi, rangi, davlat raqamini yuboring.",
+			"Аввал иловани тўлдиринг: /start ни босинг ва телефон, машина тури, ранги, давлат рақамини юборинг.",
+		))
 		return
 	}
 	var userID int64
@@ -1095,7 +1164,10 @@ func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 	}
 	if !lastLat.Valid || !lastLng.Valid {
 		kb := getDriverKeyboard(db, userID)
-		m := tgbotapi.NewMessage(chatID, "Avval lokatsiyangizni yuboring (Telegramda 📎 → Location). So'rovlar olish uchun lokatsiya kerak.")
+		m := tgbotapi.NewMessage(chatID, utils.Tr(lang,
+			"Avval lokatsiyangizni yuboring (Telegramda 📎 → Location). So'rovlar olish uchun lokatsiya kerak.",
+			"Аввал локациянгизни юборинг (Telegramда 📎 → Location). Сўровлар олиш учун локация керак.",
+		))
 		m.ReplyMarkup = kb
 		if _, err := bot.Send(m); err != nil {
 			log.Printf("driver: send: %v", err)
@@ -1104,7 +1176,11 @@ func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 	}
 	if userID != 0 && !isDriverBalanceSufficient(ctx, db, userID, cfg) {
 		kb := getDriverKeyboard(db, userID)
-		m := tgbotapi.NewMessage(chatID, insufficientBalanceMessage)
+		text := utils.Tr(lang,
+			insufficientBalanceMessage,
+			"Балансингиз етарли эмас. Сўровлар олиш учун балансни тўлдиринг.",
+		)
+		m := tgbotapi.NewMessage(chatID, text)
 		m.ReplyMarkup = kb
 		if _, err := bot.Send(m); err != nil {
 			log.Printf("driver: send: %v", err)
@@ -1123,7 +1199,10 @@ func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 	sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 	// Message with keyboard and online bonus explanation.
 	kb := driverKeyboardForStatus(true)
-	m := tgbotapi.NewMessage(chatID, "🟢 Siz onlinesiz.\n\n💰 Online bonus ishlayapti.\n1 soat → +2 000 so'm\n\nBugungi limit:\n20 000 so'm")
+	m := tgbotapi.NewMessage(chatID, utils.Tr(lang,
+		"🟢 Siz onlinesiz.\n\n💰 Online bonus ishlayapti.\n1 soat → +2 000 so'm\n\nBugungi limit:\n20 000 so'm",
+		"🟢 Сиз онлайниз.\n\n💰 Онлайн бонус ишлаяпти.\n1 соат → +2 000 сўм\n\nБугунги лимит:\n20 000 сўм",
+	))
 	m.ReplyMarkup = kb
 	if _, err := bot.Send(m); err != nil {
 		log.Printf("driver: send: %v", err)
@@ -1139,20 +1218,27 @@ func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 
 func handleOffline(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	ctx := context.Background()
+	lang := getUserLang(ctx, db, telegramID)
 	_, err := db.ExecContext(ctx, `
 		UPDATE drivers SET is_active = 0, manual_offline = 1
 		WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?1)`,
 		telegramID)
 	if err != nil {
 		log.Printf("driver: offline: %v", err)
-		send(bot, chatID, "Xatolik.")
+		send(bot, chatID, utils.Tr(lang,
+			"Xatolik.",
+			"Хатолик.",
+		))
 		return
 	}
 	var userID int64
 	_ = db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID)
 	sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 	kb := getDriverKeyboard(db, userID)
-	m := tgbotapi.NewMessage(chatID, "🔴 Siz oflaynsiz.")
+	m := tgbotapi.NewMessage(chatID, utils.Tr(lang,
+		"🔴 Siz oflaynsiz.",
+		"🔴 Сиз оффлайнсиз.",
+	))
 	m.ReplyMarkup = kb
 	if _, err := bot.Send(m); err != nil {
 		log.Printf("driver: send: %v", err)
@@ -1315,9 +1401,13 @@ func handleLeaderboard(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int6
 // handleStatus replies with the same layout as the pinned status panel.
 func handleStatus(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
 	ctx := context.Background()
+	lang := getUserLang(ctx, db, telegramID)
 	var userID int64
 	if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID); err != nil || userID == 0 {
-		send(bot, chatID, "Avval /start bosing.")
+		send(bot, chatID, utils.Tr(lang,
+			"Avval /start bosing.",
+			"Аввал /start тугмасини босинг.",
+		))
 		return
 	}
 	// Update the pinned status panel instead of sending a new status message.
@@ -1328,8 +1418,12 @@ func handleRequestLocation(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 	ctx := context.Background()
 	var userID int64
 	_ = db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID)
+	lang := getUserLang(ctx, db, telegramID)
 	kb := getDriverKeyboard(db, userID)
-	m := tgbotapi.NewMessage(chatID, "Lokatsiyani Telegramda 📎 → Location orqali yuboring.")
+	m := tgbotapi.NewMessage(chatID, utils.Tr(lang,
+		"Lokatsiyani Telegramda 📎 → Location orqali yuboring.",
+		"Локацияни Telegramда 📎 → Location орқали юборинг.",
+	))
 	m.ReplyMarkup = kb
 	if _, err := bot.Send(m); err != nil {
 		log.Printf("driver: send: %v", err)
