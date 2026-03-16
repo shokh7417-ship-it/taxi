@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -839,7 +841,7 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 				log.Printf("driver: admin approval header sent user_id=%d", userID)
 			}
 
-			// Photos via admin bot, using URLs built from driver bot getFile.
+			// Photos via admin bot: download from driver bot and re-upload as bytes.
 			if bot != nil {
 				// License photo
 				var licenseID sql.NullString
@@ -849,10 +851,24 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 						log.Printf("driver: getFile license error user_id=%d: %v", userID, err)
 					} else if f.FilePath != "" {
 						url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", cfg.DriverBotToken, f.FilePath)
-						if _, err := adminBot.Send(tgbotapi.NewPhoto(adminChatID, tgbotapi.FileURL(url))); err != nil {
-							log.Printf("driver: admin license photo send error user_id=%d: %v", userID, err)
+						if resp, err := http.Get(url); err != nil {
+							log.Printf("driver: download license photo error user_id=%d: %v", userID, err)
 						} else {
-							log.Printf("driver: admin license photo sent user_id=%d", userID)
+							defer resp.Body.Close()
+							data, err := io.ReadAll(resp.Body)
+							if err != nil {
+								log.Printf("driver: read license photo error user_id=%d: %v", userID, err)
+							} else {
+								photo := tgbotapi.NewPhoto(adminChatID, tgbotapi.FileBytes{
+									Name:  "license.jpg",
+									Bytes: data,
+								})
+								if _, err := adminBot.Send(photo); err != nil {
+									log.Printf("driver: admin license photo send error user_id=%d: %v", userID, err)
+								} else {
+									log.Printf("driver: admin license photo sent user_id=%d", userID)
+								}
+							}
 						}
 					}
 				}
@@ -861,10 +877,24 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 					log.Printf("driver: getFile vehicle doc error user_id=%d: %v", userID, err)
 				} else if f.FilePath != "" {
 					url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", cfg.DriverBotToken, f.FilePath)
-					if _, err := adminBot.Send(tgbotapi.NewPhoto(adminChatID, tgbotapi.FileURL(url))); err != nil {
-						log.Printf("driver: admin vehicle doc photo send error user_id=%d: %v", userID, err)
+					if resp, err := http.Get(url); err != nil {
+						log.Printf("driver: download vehicle doc photo error user_id=%d: %v", userID, err)
 					} else {
-						log.Printf("driver: admin vehicle doc photo sent user_id=%d", userID)
+						defer resp.Body.Close()
+						data, err := io.ReadAll(resp.Body)
+						if err != nil {
+							log.Printf("driver: read vehicle doc photo error user_id=%d: %v", userID, err)
+						} else {
+							photo := tgbotapi.NewPhoto(adminChatID, tgbotapi.FileBytes{
+								Name:  "vehicle_doc.jpg",
+								Bytes: data,
+							})
+							if _, err := adminBot.Send(photo); err != nil {
+								log.Printf("driver: admin vehicle doc photo send error user_id=%d: %v", userID, err)
+							} else {
+								log.Printf("driver: admin vehicle doc photo sent user_id=%d", userID)
+							}
+						}
 					}
 				}
 			}
