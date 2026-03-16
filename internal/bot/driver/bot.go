@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -612,20 +613,22 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, ref
 }
 
 // inferApplicationStep returns the next application step and whether the application is complete.
-// Registration includes: phone, car_type, color, plate, license_photo, vehicle_doc.
+// Registration includes: phone, first_name, last_name, car_type, color, plate, license_photo, vehicle_doc.
 // Drivers with verification_status = 'approved' (e.g. existing before doc flow) are treated as complete without doc file_ids.
 func inferApplicationStep(ctx context.Context, db *sql.DB, userID int64) (step string, complete bool) {
-	var phone, carType, color, plate, licenseFileID, vehicleFileID, verificationStatus sql.NullString
+	var phone, firstName, lastName, carType, color, plate, licenseFileID, vehicleFileID, verificationStatus sql.NullString
 	var appStep sql.NullString
-	err := db.QueryRowContext(ctx, `SELECT phone, car_type, color, plate, license_photo_file_id, vehicle_doc_file_id, application_step, verification_status FROM drivers WHERE user_id = ?1`, userID).
-		Scan(&phone, &carType, &color, &plate, &licenseFileID, &vehicleFileID, &appStep, &verificationStatus)
+	err := db.QueryRowContext(ctx, `SELECT phone, first_name, last_name, car_type, color, plate, license_photo_file_id, vehicle_doc_file_id, application_step, verification_status FROM drivers WHERE user_id = ?1`, userID).
+		Scan(&phone, &firstName, &lastName, &carType, &color, &plate, &licenseFileID, &vehicleFileID, &appStep, &verificationStatus)
 	if err != nil {
-		_ = db.QueryRowContext(ctx, `SELECT phone, car_type, color, plate, application_step FROM drivers WHERE user_id = ?1`, userID).
-			Scan(&phone, &carType, &color, &plate, &appStep)
+		_ = db.QueryRowContext(ctx, `SELECT phone, first_name, last_name, car_type, color, plate, application_step FROM drivers WHERE user_id = ?1`, userID).
+			Scan(&phone, &firstName, &lastName, &carType, &color, &plate, &appStep)
 		licenseFileID, vehicleFileID, verificationStatus = sql.NullString{}, sql.NullString{}, sql.NullString{}
 	}
 
 	missingPhone := !phone.Valid || strings.TrimSpace(phone.String) == ""
+	missingFirstName := !firstName.Valid || strings.TrimSpace(firstName.String) == ""
+	missingLastName := !lastName.Valid || strings.TrimSpace(lastName.String) == ""
 	missingCarType := !carType.Valid || strings.TrimSpace(carType.String) == ""
 	missingColor := !color.Valid || strings.TrimSpace(color.String) == ""
 	missingPlate := !plate.Valid || strings.TrimSpace(plate.String) == ""
@@ -633,7 +636,7 @@ func inferApplicationStep(ctx context.Context, db *sql.DB, userID int64) (step s
 	missingVehicle := !vehicleFileID.Valid || strings.TrimSpace(vehicleFileID.String) == ""
 	alreadyApproved := verificationStatus.Valid && strings.TrimSpace(verificationStatus.String) == "approved"
 
-	if !missingPhone && !missingCarType && !missingColor && !missingPlate && (!missingLicense && !missingVehicle || alreadyApproved) {
+	if !missingPhone && !missingFirstName && !missingLastName && !missingCarType && !missingColor && !missingPlate && (!missingLicense && !missingVehicle || alreadyApproved) {
 		return "", true
 	}
 
@@ -643,6 +646,14 @@ func inferApplicationStep(ctx context.Context, db *sql.DB, userID int64) (step s
 		case "phone":
 			if missingPhone {
 				return "phone", false
+			}
+		case "first_name":
+			if missingFirstName {
+				return "first_name", false
+			}
+		case "last_name":
+			if missingLastName {
+				return "last_name", false
 			}
 		case "car_type", "car_type_manual":
 			if missingCarType {
@@ -670,6 +681,14 @@ func inferApplicationStep(ctx context.Context, db *sql.DB, userID int64) (step s
 	if missingPhone {
 		setApplicationStep(ctx, db, userID, "phone")
 		return "phone", false
+	}
+	if missingFirstName {
+		setApplicationStep(ctx, db, userID, "first_name")
+		return "first_name", false
+	}
+	if missingLastName {
+		setApplicationStep(ctx, db, userID, "last_name")
+		return "last_name", false
 	}
 	if missingCarType {
 		setApplicationStep(ctx, db, userID, "car_type")
@@ -700,7 +719,7 @@ func clearApplicationStep(ctx context.Context, db *sql.DB, userID int64) {
 	_, _ = db.ExecContext(ctx, `UPDATE drivers SET application_step = NULL WHERE user_id = ?1`, userID)
 }
 
-// sendApplicationPrompt sends the next question for the driver application (phone -> car_type -> color -> plate).
+// sendApplicationPrompt sends the next question for the driver application (phone -> first_name -> last_name -> car_type -> color -> plate).
 // For the phone step, shows a "Share number" button; for car_type/color, shows button keyboards.
 func sendApplicationPrompt(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, driverUserID int64, step string) {
 	switch step {
@@ -718,6 +737,12 @@ func sendApplicationPrompt(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, drive
 		if _, err := bot.Send(m); err != nil {
 			log.Printf("driver: send application prompt: %v", err)
 		}
+		return
+	case "first_name":
+		send(bot, chatID, "Ismingizni kiriting")
+		return
+	case "last_name":
+		send(bot, chatID, "Familyangizni kiriting")
 		return
 	case "car_type":
 		text := "Mashina turini tanlang yoki «Boshqa» bosing va yozing."
@@ -825,10 +850,24 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 			send(bot, chatID, "Bu telefon raqami allaqachon ro'yxatdan o'tgan. Boshqa raqamdan foydalaning.")
 			return true
 		}
-		_, err = db.ExecContext(ctx, `UPDATE drivers SET phone = ?1, application_step = 'car_type' WHERE user_id = ?2`, text, userID)
+		_, err = db.ExecContext(ctx, `UPDATE drivers SET phone = ?1, application_step = 'first_name' WHERE user_id = ?2`, text, userID)
 		if err != nil {
 			log.Printf("driver: save phone: %v", err)
 			_, _ = db.ExecContext(ctx, `UPDATE drivers SET phone = ?1 WHERE user_id = ?2`, text, userID)
+		}
+		sendApplicationPrompt(bot, db, chatID, userID, "first_name")
+	case "first_name":
+		_, err = db.ExecContext(ctx, `UPDATE drivers SET first_name = ?1, application_step = 'last_name' WHERE user_id = ?2`, text, userID)
+		if err != nil {
+			log.Printf("driver: save first_name: %v", err)
+			_, _ = db.ExecContext(ctx, `UPDATE drivers SET first_name = ?1 WHERE user_id = ?2`, text, userID)
+		}
+		sendApplicationPrompt(bot, db, chatID, userID, "last_name")
+	case "last_name":
+		_, err = db.ExecContext(ctx, `UPDATE drivers SET last_name = ?1, application_step = 'car_type' WHERE user_id = ?2`, text, userID)
+		if err != nil {
+			log.Printf("driver: save last_name: %v", err)
+			_, _ = db.ExecContext(ctx, `UPDATE drivers SET last_name = ?1 WHERE user_id = ?2`, text, userID)
 		}
 		sendApplicationPrompt(bot, db, chatID, userID, "car_type")
 	case "car_type":
@@ -866,14 +905,16 @@ func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID 
 		}
 		sendApplicationPrompt(bot, db, chatID, userID, "plate")
 	case "plate":
-		if !isDigitsOnly(text) {
-			send(bot, chatID, "Faqat raqam yuboring. Masalan: 305")
+		plate := strings.ToUpper(text)
+		matched, _ := regexp.MatchString(`^[0-9]{2}[A-Z]{1}[0-9]{3}[A-Z]{2}$`, plate)
+		if !matched {
+			send(bot, chatID, "Noto'g'ri raqam formati.\nMasalan: 20N306ZB")
 			return true
 		}
-		_, err = db.ExecContext(ctx, `UPDATE drivers SET plate = ?1, application_step = 'license_photo' WHERE user_id = ?2`, text, userID)
+		_, err = db.ExecContext(ctx, `UPDATE drivers SET plate = ?1, plate_number = ?1, application_step = 'license_photo' WHERE user_id = ?2`, plate, userID)
 		if err != nil {
 			log.Printf("driver: save plate: %v", err)
-			_, _ = db.ExecContext(ctx, `UPDATE drivers SET plate = ?1, application_step = 'license_photo' WHERE user_id = ?2`, text, userID)
+			_, _ = db.ExecContext(ctx, `UPDATE drivers SET plate = ?1, plate_number = ?1, application_step = 'license_photo' WHERE user_id = ?2`, plate, userID)
 		}
 		sendApplicationPrompt(bot, db, chatID, userID, "license_photo")
 	default:
