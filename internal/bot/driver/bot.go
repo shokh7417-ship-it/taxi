@@ -1353,7 +1353,7 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		log.Printf("driver: live_location end user_id=%d", userID)
 		sendOrUpdatePinnedStatus(bot, db, chatID, userID)
 		kb := getDriverKeyboard(db, userID)
-			m := tgbotapi.NewMessage(chatID, "📍 Jonli lokatsiya o'chdi.")
+		m := tgbotapi.NewMessage(chatID, "📍 Jonli lokatsiya o'chdi.\n\n⚠️ Buyurtmalar kelmaydi.\n\nQayta jonli lokatsiya ulash uchun:\n📎 → Location → Share Live Location")
 		m.ReplyMarkup = kb
 		if _, err := bot.Send(m); err != nil {
 			log.Printf("driver: send: %v", err)
