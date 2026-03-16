@@ -362,6 +362,10 @@ func driverKeyboardForVerificationPending() tgbotapi.ReplyKeyboardMarkup {
 }
 
 // formatStatusPanelText returns the status panel text (same layout as /status and pinned panel), including today's online bonus.
+// State mapping:
+// 🔴 Offline                -> is_active = 0
+// 🟢 Online (no live)       -> is_active = 1 and live location not recent
+// 🟡 Online + Live Location -> is_active = 1 and live location recent (bonus-eligible)
 func formatStatusPanelText(ctx context.Context, db *sql.DB, userID int64) (string, error) {
 	var isActive int
 	var balance int64
@@ -371,16 +375,27 @@ func formatStatusPanelText(ctx context.Context, db *sql.DB, userID int64) (strin
 		return "", err
 	}
 	holat := "🔴 Offline"
-	if isActive == 1 {
-		holat = "🟢 Online"
-	}
 	liveLine := "❌ Jonli lokatsiya yoqilmagan"
+	liveRecent := false
 	if lastLiveAt.Valid && lastLiveAt.String != "" {
-		if t, err := parseUTC(lastLiveAt.String); err == nil && time.Since(t) <= time.Duration(liveLocationActiveSeconds)*time.Second {
+		if t, err := parseUTC(lastLiveAt.String); err == nil && time.Since(t) <= 60*time.Second {
+			liveRecent = true
 			liveLine = "📡 Jonli lokatsiya yoqilgan"
 		}
 	}
+	if isActive == 1 {
+		holat = "🟢 Online"
+		if liveRecent {
+			holat = "🟡 Online + Live Location"
+		}
+	}
 	text := fmt.Sprintf("📊 Haydovchi holati\n\nHolat: %s\nLokatsiya: %s\nBalans: %d so'm", holat, liveLine, balance)
+	// Warnings according to current state.
+	if isActive == 0 {
+		text += "\n\n⚠️ Buyurtmalar olish uchun Onlinega o‘ting"
+	} else if !liveRecent {
+		text += "\n\n⚠️ Bonus olish uchun jonli lokatsiyani yoqing"
+	}
 	text += fmt.Sprintf("\n\n🎁 Bugungi online bonus:\n%d / 20 000 so'm", onlineBonusToday)
 	return text, nil
 }

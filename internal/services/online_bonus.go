@@ -13,12 +13,12 @@ import (
 const (
 	onlineBonusSoMPerHour    = 2000
 	onlineBonusMaxSoMPerDay  = 20000
-	onlineBonusLiveWithinSec = 120
+	onlineBonusLiveWithinSec = 60
 	onlineBonusTickInterval  = 2 * time.Minute
 )
 
 // RunOnlineBonusWorker runs a loop that accrues online time bonus for eligible drivers every tick.
-// Eligible: is_active=1, live_location_active=1, last_live_location_at within 120 seconds.
+// Eligible: is_active=1, live_location_active=1, last_live_location_at within 60 seconds.
 // Credits 2000 so'm per hour, max 20000 so'm per day; resets at midnight. Sends driver messages when earning or when daily limit reached.
 func RunOnlineBonusWorker(ctx context.Context, db *sql.DB, driverBot *tgbotapi.BotAPI) {
 	ticker := time.NewTicker(onlineBonusTickInterval)
