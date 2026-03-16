@@ -80,6 +80,7 @@ func main() {
 	go assignSvc.RunExpiryWorker(ctx)
 	go assignSvc.RunRadiusExpansionWorker(ctx, matchSvc)
 	go services.RunOnlineBonusWorker(ctx, database, driverBot)
+	go services.RunDriverApprovalNotifier(ctx, database, driverBot)
 
 	srv := server.New(database, cfg, tripSvc, matchSvc, driverBot, riderBot, hub, fareSvc)
 	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: srv}

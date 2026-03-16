@@ -497,33 +497,6 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 		handleCallback(bot, db, cfg, assignmentService, tripService, update.CallbackQuery)
 		return
 	}
-	// Agar haydovchi hozirgina tasdiqlangan bo'lsa va hali xabar berilmagan bo'lsa,
-	// birinchi kelgan har qanday xabar/paydo bo'lishda unga tasdiqlash va bonuslar haqida xabar yuboramiz.
-	if update.Message != nil && update.Message.From != nil {
-		ctx := context.Background()
-		telegramID := update.Message.From.ID
-		var userID int64
-		if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID); err == nil && userID != 0 {
-			var status string
-			var notified, welcomeSent int
-			if err := db.QueryRowContext(ctx, `SELECT COALESCE(verification_status, ''), COALESCE(approval_notified, 0), COALESCE(welcome_bonus_message_sent, 0) FROM drivers WHERE user_id = ?1`, userID).
-				Scan(&status, &notified, &welcomeSent); err == nil {
-				if strings.TrimSpace(status) == "approved" && notified == 0 {
-					// 1) Profil tasdiqlandi xabari
-					msg := tgbotapi.NewMessage(telegramID, "🎉 Profilingiz tasdiqlandi!\n\nEndi siz buyurtmalar qabul qilishingiz mumkin.\n\n🟢 Ishni boshlash\n📡 Jonli lokatsiyani yoqing")
-					if _, err := bot.Send(msg); err != nil {
-						log.Printf("driver: notify approved driver (lazy) send error user_id=%d: %v", userID, err)
-					} else {
-						_, _ = db.ExecContext(ctx, `UPDATE drivers SET approval_notified = 1 WHERE user_id = ?1`, userID)
-					}
-					// 2) Bonuslar haqida xabar (agar hali yuborilmagan bo'lsa)
-					if welcomeSent == 0 {
-						sendWelcomeBonusMessageIfNeeded(bot, db, telegramID, userID)
-					}
-				}
-			}
-		}
-	}
 	// Live location: Telegram sends repeated updates as edited_message with new coordinates.
 	// Live end: edited_message with location.live_period == 0 or null.
 	if update.EditedMessage != nil && update.EditedMessage.Location != nil {
