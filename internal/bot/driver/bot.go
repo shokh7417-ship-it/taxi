@@ -382,7 +382,6 @@ func formatStatusPanelText(ctx context.Context, db *sql.DB, userID int64) (strin
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(is_active, 0), COALESCE(balance, 0), last_live_location_at, COALESCE(online_bonus_so_m_today, 0) FROM drivers WHERE user_id = ?1`, userID).Scan(&isActive, &balance, &lastLiveAt, &onlineBonusToday); err != nil {
 		return "", err
 	}
-	holat := "🔴 Offline"
 	liveLine := "❌ Jonli lokatsiya yoqilmagan"
 	liveRecent := false
 	if lastLiveAt.Valid && lastLiveAt.String != "" {
@@ -391,7 +390,11 @@ func formatStatusPanelText(ctx context.Context, db *sql.DB, userID int64) (strin
 			liveLine = "📡 Jonli lokatsiya yoqilgan"
 		}
 	}
-	if isActive == 1 {
+
+	// Online bo'lish = faqat bonusActive holat (online + jonli lokatsiya ON).
+	// Aks holda holat offline hisoblanadi (offline yoki jonli lokatsiya o'chgan).
+	holat := "🔴 Offline"
+	if isActive == 1 && liveRecent {
 		holat = "🟢 Online"
 	}
 
@@ -399,19 +402,15 @@ func formatStatusPanelText(ctx context.Context, db *sql.DB, userID int64) (strin
 	text += fmt.Sprintf("Holat: %s\nLokatsiya: %s\n\n", holat, liveLine)
 
 	switch {
-	// A) online + location on
+	// A) online + location on (bonusActive)
 	case isActive == 1 && liveRecent:
 		text += "✅ Buyurtmalar olishga tayyor.\n💰 Bonus ishlayapti."
 
-	// B) online + location off
-	case isActive == 1 && !liveRecent:
-		text += "⚠️ Buyurtma olish uchun lokatsiyani yoqing."
-
-	// C) offline + location on
+	// C) offline + location on (lokatsiya bor, lekin offline)
 	case isActive == 0 && liveRecent:
 		text += "⚠️ Buyurtma olish uchun online bo‘ling."
 
-	// D) offline + location off
+	// B / D) location off (offline deb ko‘rsatamiz)
 	default:
 		text += "⚠️ Ishlash uchun online bo‘ling va lokatsiyani yoqing."
 	}
