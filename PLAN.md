@@ -407,7 +407,7 @@ This document summarizes all features, flows, and fixes implemented for the Taxi
 
 - **Batched smart dispatch:**
   - Grid + radius filter, then sort drivers by distance.
-  - Dispatch in batches of up to 3 nearest drivers (`dispatchBatchSize`), with a 10s acceptance timeout per batch (`dispatchBatchWaitSec` / `DISPATCH_WAIT_SECONDS`).
+  - Dispatch in batches of up to 3 nearest drivers (`dispatchBatchSize`), with a 60s acceptance timeout per batch (`dispatchBatchWaitSec` / `DISPATCH_WAIT_SECONDS`).
   - If no one in the batch accepts and the request is still `PENDING`, mark their notifications as `TIMEOUT` and automatically send to the next batch.
   - All existing protections remain: `request_notifications` duplicate guard, cooldown per driver, request TTL, and idempotent accept logic.
 - **Dynamic max radius:**

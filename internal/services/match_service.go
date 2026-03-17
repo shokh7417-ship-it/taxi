@@ -20,7 +20,7 @@ const (
 	acceptCallbackPrefix   = "accept:"
 	defaultDriverCooldown  = 5
 	dispatchBatchSize      = 3  // send request to N nearest drivers per batch
-	dispatchBatchWaitSec   = 10 // wait this many seconds for any driver in the batch to accept before trying next batch
+	dispatchBatchWaitSec   = 60 // wait this many seconds for any driver in the batch to accept before trying next batch
 	liveLocationOrderHint  = "\n\n📍 Jonli lokatsiya yoqilgan bo'lsa buyurtmalar tezroq keladi."
 	// Live location considered active only when last_live_location_at within 90s (same as dispatch).
 	liveLocationActiveSeconds = 90

@@ -32,7 +32,7 @@ type Config struct {
 	CommissionPercent       int      // Commission percentage on fare when InfiniteDriverBalance is false (e.g. 5 or 10)
 	DispatchDebug           bool     // If true, emit verbose dispatch/grid debug logs
 	// Dispatch tuning: priority queue (one driver at a time, then next after timeout)
-	DispatchWaitSeconds         int // Seconds to wait for a driver to accept before trying next (e.g. 8–10)
+	DispatchWaitSeconds         int // Seconds to wait for a driver batch to accept before trying next (e.g. 60)
 	DispatchDriverCooldownSec   int // Cooldown before sending another request to the same driver (e.g. 5–10)
 }
 
@@ -70,7 +70,7 @@ func Load() (*Config, error) {
 		InfiniteDriverBalance:  getEnv("INFINITE_DRIVER_BALANCE", "true") == "true" || getEnv("INFINITE_DRIVER_BALANCE", "true") == "1",
 		CommissionPercent:      getEnvInt("COMMISSION_PERCENT", 5),
 		DispatchDebug:            getEnv("DISPATCH_DEBUG", "") == "true" || getEnv("DISPATCH_DEBUG", "") == "1",
-		DispatchWaitSeconds:       getEnvInt("DISPATCH_WAIT_SECONDS", 8),
+		DispatchWaitSeconds:       getEnvInt("DISPATCH_WAIT_SECONDS", 60),
 		DispatchDriverCooldownSec: getEnvInt("DISPATCH_DRIVER_COOLDOWN_SECONDS", 5),
 	}
 
