@@ -942,7 +942,6 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 		send(bot, chatID, "✅ Ma’lumotlaringiz qabul qilindi.\nAdmin tasdiqlashidan so‘ng sizga xabar beriladi.")
 	showTermsShortOnce(bot, db, chatID, telegramID)
 	rewardReferrerOnApplicationComplete(bot, db, userID)
-	_, _ = db.ExecContext(ctx, `UPDATE drivers SET balance = balance + 100000, signup_bonus_paid = 1 WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, userID)
 	kb := getDriverKeyboard(db, userID)
 	m := tgbotapi.NewMessage(chatID, "Tasdiqlash kutilmoqda. Holatni /status buyrug'i orqali tekshiring.")
 	m.ReplyMarkup = kb
@@ -1702,6 +1701,12 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, assign
 				log.Printf("driver: approve driver update error user_id=%d: %v", driverUserID, err)
 				return
 			}
+			// Signup bonus: add 100 000 so'm once AFTER approval.
+			_, _ = db.ExecContext(ctx, `
+				UPDATE drivers
+				SET balance = balance + 100000,
+				    signup_bonus_paid = 1
+				WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, driverUserID)
 			log.Printf("driver: driver approved by admin user_id=%d", driverUserID)
 			if notified != 0 {
 				// Approval already notified via some other path.
