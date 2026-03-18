@@ -41,7 +41,7 @@ const (
 	onboardingMessage = "🚕 YettiQanot Haydovchi\n\nBuyurtmalar olish uchun 2 ta qadam:\n\n1️⃣ Ishni boshlash (online bo'lish)\n2️⃣ Jonli lokatsiyani yoqish\n\nShundan keyin sizga yaqin buyurtmalar keladi."
 
 	// Welcome bonus message: explains all driver bonuses (shown once after registration).
-	welcomeBonusMessage = "🎁 Haydovchi bonuslari\n\n1️⃣ Yangi haydovchi bonusi: 100 000 so'm platform krediti (hisobingizga qo'shildi)\n\n2️⃣ Birinchi oy 0% komissiya\n\n3️⃣ Online bonus: 1 soat online → +2 000 so'm. Kunlik limit: 20 000 so'm"
+	welcomeBonusMessage = "🎁 Haydovchi bonuslari\n\n1️⃣ Yangi haydovchi bonusi: 100 000 so'm platform krediti (hisobingizga qo'shildi)\n\n2️⃣ Online bonus: 1 soat online → +2 000 so'm. Kunlik limit: 20 000 so'm"
 	// Bilingual instruction line for all Live Location prompts.
 	liveLocationBilingualInstruction = "📎 → Геопозиция / Location → Транслировать геопозицию / Share Live Location"
 	// Instruction when driver presses "Jonli lokatsiya yoqish" and is not sharing live.

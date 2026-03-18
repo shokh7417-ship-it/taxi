@@ -365,8 +365,8 @@ func (s *TripService) FinishTrip(ctx context.Context, tripID string, driverUserI
 			}
 		}
 	}
-	// When InfiniteDriverBalance is false, deduct commission from normalized fare and record payment.
-	if s.cfg != nil && !s.cfg.InfiniteDriverBalance && fareAmount > 0 {
+	// Always deduct commission from normalized fare and record payment (fareAmount already normalized).
+	if s.cfg != nil && fareAmount > 0 {
 		pc := 5
 		if s.fareSvc != nil {
 			if settings, err := s.fareSvc.GetFareSettings(ctx); err == nil && settings != nil && settings.CommissionPercent > 0 {
