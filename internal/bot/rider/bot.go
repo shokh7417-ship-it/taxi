@@ -25,6 +25,7 @@ const (
 	btnTaxiNew     = "🚕 Yangi taxi chaqirish"
 	btnHelp        = "ℹ️ Yordam"
 	btnTrackDriver = "📍 Haydovchini kuzatish"
+	cbRiderAcceptTerms = "rider_accept_terms"
 )
 
 // Run starts the rider bot and blocks until ctx is cancelled.
@@ -101,7 +102,7 @@ func (n *notifiedState) markFinished(tripID string) bool {
 
 func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchService *services.MatchService, tripService *services.TripService, update tgbotapi.Update, notified *notifiedState) {
 	if update.CallbackQuery != nil {
-		handleCallback(bot, db, update.CallbackQuery)
+		handleCallback(bot, db, cfg, matchService, update.CallbackQuery)
 		return
 	}
 	if update.Message == nil {
@@ -127,6 +128,12 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 	}
 	if msg.Command() == "cancel" {
 		handleCancel(bot, db, cfg, tripService, chatID, telegramID)
+		return
+	}
+
+	// Block usage until rider accepts agreement.
+	if !isRiderTermsAccepted(context.Background(), db, telegramID) {
+		send(bot, chatID, "⚠️ Davom etish uchun avval qoidalarni qabul qilishingiz kerak.\n\n/start buyrug'ini bosing.")
 		return
 	}
 
@@ -170,16 +177,43 @@ func setBotCommands(bot *tgbotapi.BotAPI) {
 	}
 }
 
-func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, q *tgbotapi.CallbackQuery) {
+func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchService *services.MatchService, q *tgbotapi.CallbackQuery) {
+	// Always ACK callback quickly.
 	_, _ = bot.Request(tgbotapi.NewCallback(q.ID, ""))
-	if q.Data == "search_again" {
-		// Ask phone first (always), then location.
+
+	if q.Data == cbRiderAcceptTerms {
+		ctx := context.Background()
 		telegramID := q.From.ID
+		// Ensure user exists (idempotent).
+		_, _ = db.ExecContext(ctx, `
+			INSERT INTO users (telegram_id, role) VALUES (?1, ?2)
+			ON CONFLICT (telegram_id) DO UPDATE SET role = excluded.role`,
+			telegramID, domain.RoleRider)
+		_, _ = db.ExecContext(ctx, `UPDATE users SET terms_accepted = 1 WHERE telegram_id = ?1`, telegramID)
+		send(bot, q.Message.Chat.ID, "✅ Qoidalar qabul qilindi.\n\nEndi siz bemalol buyurtma berishingiz mumkin.")
+		// Continue normal flow: ensure phone, then show menu.
+		if ensureRiderPhone(bot, db, q.Message.Chat.ID, telegramID) {
+			return
+		}
+		sendMainMenu(bot, q.Message.Chat.ID)
+		return
+	}
+
+	if q.Data == "search_again" {
+		telegramID := q.From.ID
+		if !isRiderTermsAccepted(context.Background(), db, telegramID) {
+			sendRiderAgreement(bot, q.Message.Chat.ID)
+			return
+		}
+		// Ask phone first (always), then location.
 		if ensureRiderPhone(bot, db, q.Message.Chat.ID, telegramID) {
 			return
 		}
 		sendLocationPrompt(bot, q.Message.Chat.ID)
+		return
 	}
+	_ = cfg
+	_ = matchService
 }
 
 func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, telegramID int64, referredBy *string) {
@@ -209,24 +243,33 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, telegramID int6
 	if ensureRiderPhone(bot, db, chatID, telegramID) {
 		return
 	}
+	// Show rider agreement once on first start, before allowing usage.
+	if !isRiderTermsAccepted(ctx, db, telegramID) {
+		sendRiderAgreement(bot, chatID)
+		return
+	}
 	sendMainMenu(bot, chatID)
-	showTermsShortOnce(bot, db, chatID, telegramID)
 }
 
-func showTermsShortOnce(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
-	ctx := context.Background()
-	var termsAccepted int
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(terms_accepted, 0) FROM users WHERE telegram_id = ?1`, telegramID).Scan(&termsAccepted); err != nil {
-		return
+func isRiderTermsAccepted(ctx context.Context, db *sql.DB, telegramID int64) bool {
+	var accepted int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(terms_accepted, 0) FROM users WHERE telegram_id = ?1`, telegramID).Scan(&accepted); err != nil {
+		return false
 	}
-	if termsAccepted != 0 {
-		return
+	return accepted != 0
+}
+
+func sendRiderAgreement(bot *tgbotapi.BotAPI, chatID int64) {
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Qabul qilaman", cbRiderAcceptTerms),
+		),
+	)
+	m := tgbotapi.NewMessage(chatID, legal.RiderAgreementMessage)
+	m.ReplyMarkup = kb
+	if _, err := bot.Send(m); err != nil {
+		log.Printf("rider: send agreement: %v", err)
 	}
-	if _, err := bot.Send(tgbotapi.NewMessage(chatID, legal.TermsShortMessage)); err != nil {
-		log.Printf("rider: send terms short: %v", err)
-		return
-	}
-	_, _ = db.ExecContext(ctx, `UPDATE users SET terms_accepted = 1 WHERE telegram_id = ?1`, telegramID)
 }
 
 // sendMainMenu shows the persistent main menu: Taxi chaqirish, Yordam.
