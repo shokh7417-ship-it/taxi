@@ -928,10 +928,6 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 		sendDriverAgreement(bot, chatID)
 		// Notify driver that we're waiting for acceptance + admin.
 		send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
-		kb := getDriverKeyboard(db, userID)
-		m := tgbotapi.NewMessage(chatID, "Tasdiqlash kutilmoqda. Holatni /status buyrug'i orqali tekshiring.")
-		m.ReplyMarkup = kb
-		_, _ = bot.Send(m)
 		return true
 	}
 
