@@ -509,7 +509,9 @@ func sendOrUpdatePinnedStatus(bot *tgbotapi.BotAPI, db *sql.DB, chatID, userID i
 	}
 	// Create first status message and pin it once.
 	m := tgbotapi.NewMessage(chatID, text)
-	m.ReplyMarkup = getDriverKeyboard(db, userID)
+	// Do NOT attach reply keyboard to the pinned status message.
+	// In practice this message can become non-editable when a reply keyboard is attached, causing
+	// repeated "message can't be edited" errors and status spam. Keyboards are shown via other messages.
 	sent, err := bot.Send(m)
 	if err != nil {
 		log.Printf("driver: send pinned status: %v", err)
