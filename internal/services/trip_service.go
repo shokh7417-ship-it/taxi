@@ -290,19 +290,8 @@ func (s *TripService) FinishTrip(ctx context.Context, tripID string, driverUserI
 	}
 	// Normalized fare: if > 50 so'm round to nearest 100; if <= 50 so'm then 0. Stored and shown to users; commission taken from this.
 	fareAmount := normalizeFare(rawFare)
-	// Rider referral bonus: apply as fare discount (non-withdrawable); deduct from rider's referral_bonus_balance.
+	// Rider bonus/discount is disabled: no referral bonus is applied for riders.
 	var riderBonusUsed int64
-	var riderBonusBalance int64
-	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(referral_bonus_balance, 0) FROM users WHERE id = ?1`, riderUserID).Scan(&riderBonusBalance)
-	if riderBonusBalance > 0 && fareAmount > 0 {
-		riderBonusUsed = fareAmount
-		if riderBonusUsed > riderBonusBalance {
-			riderBonusUsed = riderBonusBalance
-		}
-		if riderBonusUsed > 0 {
-			_, _ = s.db.ExecContext(ctx, `UPDATE users SET referral_bonus_balance = referral_bonus_balance - ?1 WHERE id = ?2`, riderBonusUsed, riderUserID)
-		}
-	}
 	n, err := s.tripRepo.UpdateToFinished(ctx, tripID, driverUserID, fareAmount, riderBonusUsed)
 	if err != nil {
 		return nil, err
@@ -560,13 +549,6 @@ func normalizeFare(rawFare int64) int64 {
 
 func formatTripSummary(distanceM, fareAmount int64, riderBonusUsed int64) string {
 	km := float64(distanceM) / 1000
-	if riderBonusUsed > 0 {
-		toPay := fareAmount - riderBonusUsed
-		if toPay < 0 {
-			toPay = 0
-		}
-		return fmt.Sprintf("Safar tugadi.\nMasofa: %.2f km\nNarx: %d so'm\nChegirma (bonus): %d so'm\nTo'lovingiz: %d so'm", km, fareAmount, riderBonusUsed, toPay)
-	}
 	return fmt.Sprintf("Safar tugadi.\nMasofa: %.2f km\nNarx: %d so'm", km, fareAmount)
 }
 

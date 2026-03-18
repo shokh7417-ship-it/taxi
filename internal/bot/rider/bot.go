@@ -225,15 +225,13 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, telegramID int6
 		return
 	}
 	var refArg interface{}
-	bonusBalance := int64(0)
 	if referredBy != nil && *referredBy != "" {
 		refArg = *referredBy
-		bonusBalance = 20000 // Rider referral bonus: 20000 so'm, fare discount only (non-withdrawable).
 	}
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO users (telegram_id, role, referral_code, referred_by, referral_bonus_balance) VALUES (?1, ?2, ?3, ?4, ?5)
+		INSERT INTO users (telegram_id, role, referral_code, referred_by) VALUES (?1, ?2, ?3, ?4)
 		ON CONFLICT (telegram_id) DO UPDATE SET role = excluded.role`,
-		telegramID, domain.RoleRider, code, refArg, bonusBalance)
+		telegramID, domain.RoleRider, code, refArg)
 	if err != nil {
 		log.Printf("rider: upsert user: %v", err)
 		send(bot, chatID, "Xatolik. Qayta urinib ko‘ring.")
