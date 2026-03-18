@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"taxi-mvp/internal/legal"
 )
 
 // RunDriverApprovalNotifier periodically checks for drivers whose verification_status is 'approved'
@@ -54,6 +55,9 @@ func notifyApprovedDrivers(ctx context.Context, db *sql.DB, driverBot *tgbotapi.
 			continue
 		}
 
+		// Show short Terms of Use once per user (anti-spam via users.terms_accepted flag).
+		showTermsShortOnceForUser(ctx, db, driverBot, telegramID)
+
 		// 2) Bonuslar haqida xabar (agar hali yuborilmagan bo'lsa)
 		var welcomeSent int
 		if err := db.QueryRowContext(ctx, `SELECT COALESCE(welcome_bonus_message_sent, 0) FROM drivers WHERE user_id = ?1`, userID).Scan(&welcomeSent); err == nil && welcomeSent == 0 {
@@ -85,5 +89,19 @@ func notifyApprovedDrivers(ctx context.Context, db *sql.DB, driverBot *tgbotapi.
 	if err := rows.Err(); err != nil {
 		log.Printf("driver_approval_notifier: rows: %v", err)
 	}
+}
+
+func showTermsShortOnceForUser(ctx context.Context, db *sql.DB, bot *tgbotapi.BotAPI, telegramID int64) {
+	var accepted int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(terms_accepted, 0) FROM users WHERE telegram_id = ?1`, telegramID).Scan(&accepted); err != nil {
+		return
+	}
+	if accepted != 0 {
+		return
+	}
+	if _, err := bot.Send(tgbotapi.NewMessage(telegramID, legal.TermsShortMessage)); err != nil {
+		return
+	}
+	_, _ = db.ExecContext(ctx, `UPDATE users SET terms_accepted = 1 WHERE telegram_id = ?1`, telegramID)
 }
 

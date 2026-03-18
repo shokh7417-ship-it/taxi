@@ -17,6 +17,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/domain"
+	"taxi-mvp/internal/legal"
 	"taxi-mvp/internal/services"
 	"taxi-mvp/internal/utils"
 )
@@ -32,6 +33,7 @@ const (
 	btnLiveLocation = "📡 Jonli lokatsiya yoqish"
 	btnPending      = "⏳ Tasdiqlash kutilmoqda"
 	cbAccept        = "accept:"
+	cbDriverAcceptTerms = "driver_accept_terms"
 
 	// Live Location = only edited_message.location updates; active only when last_live_location_at within 90s.
 	liveLocationActiveSeconds = 90
@@ -63,6 +65,30 @@ const (
 	// Registration: car types (Uzbekistan taxi market). "Boshqa" allows manual input.
 	carTypeBoshqa = "Boshqa"
 )
+
+func driverAgreementInlineKeyboard() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Qabul qilaman", cbDriverAcceptTerms),
+		),
+	)
+}
+
+func sendDriverAgreement(bot *tgbotapi.BotAPI, chatID int64) {
+	m := tgbotapi.NewMessage(chatID, legal.DriverAgreementMessage)
+	m.ReplyMarkup = driverAgreementInlineKeyboard()
+	if _, err := bot.Send(m); err != nil {
+		log.Printf("driver: send agreement: %v", err)
+	}
+}
+
+func driverHasAcceptedAgreement(ctx context.Context, db *sql.DB, userID int64) bool {
+	var accepted int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(terms_accepted, 0) FROM drivers WHERE user_id = ?1`, userID).Scan(&accepted); err != nil {
+		return false
+	}
+	return accepted != 0
+}
 var (
 	carTypes = []string{"Cobalt", "Nexia", "Nexia 2", "Nexia 3", "Matiz", "Gentra", "Lacetti", "Malibu", "BYD", "Lada", "Damas", carTypeBoshqa}
 	colors   = []string{"Oq", "Qora", "Sariq", "Qizil", "Kulrang", "Boshqa"}
@@ -326,6 +352,7 @@ func Run(ctx context.Context, cfg *config.Config, db *sql.DB, bot *tgbotapi.BotA
 		tgbotapi.BotCommand{Command: "bonuslar", Description: "Bonuslar va referral statistikasi"},
 		tgbotapi.BotCommand{Command: "referral", Description: "Do'stlarni taklif qilish"},
 		tgbotapi.BotCommand{Command: "leaderboard", Description: "Eng faol haydovchilar"},
+		tgbotapi.BotCommand{Command: "terms", Description: "Foydalanish qoidalari"},
 	)
 	if _, err := bot.Request(driverCommands); err != nil {
 		log.Printf("driver bot: setMyCommands: %v", err)
@@ -570,6 +597,9 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 	case "leaderboard":
 		handleLeaderboard(bot, db, chatID, telegramID)
 		return
+	case "terms":
+		send(bot, chatID, legal.TermsFullMessage)
+		return
 	case "online":
 		handleOnline(bot, db, cfg, matchService, chatID, telegramID)
 		return
@@ -668,8 +698,25 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, ref
 	if _, err := bot.Send(m); err != nil {
 		log.Printf("driver: send: %v", err)
 	}
+	showTermsShortOnce(bot, db, chatID, telegramID)
 	sendWelcomeBonusMessageIfNeeded(bot, db, chatID, userID)
 	sendOrUpdatePinnedStatus(bot, db, chatID, userID)
+}
+
+func showTermsShortOnce(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
+	ctx := context.Background()
+	var termsAccepted int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(terms_accepted, 0) FROM users WHERE telegram_id = ?1`, telegramID).Scan(&termsAccepted); err != nil {
+		return
+	}
+	if termsAccepted != 0 {
+		return
+	}
+	if _, err := bot.Send(tgbotapi.NewMessage(chatID, legal.TermsShortMessage)); err != nil {
+		log.Printf("driver: send terms short: %v", err)
+		return
+	}
+	_, _ = db.ExecContext(ctx, `UPDATE users SET terms_accepted = 1 WHERE telegram_id = ?1`, telegramID)
 }
 
 // inferApplicationStep returns the next application step and whether the application is complete.
@@ -875,107 +922,25 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 	log.Printf("driver: registration docs saved user_id=%d", userID)
 	log.Printf("driver: status changed to pending_approval user_id=%d", userID)
 
-	// Load driver info for admin approval request.
-	var firstName, lastName, phone, carModel, color, plateNumber sql.NullString
-	if err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(first_name, ''), COALESCE(last_name, ''), COALESCE(phone, ''), COALESCE(car_type, ''), COALESCE(color, ''), COALESCE(plate_number, '')
-		FROM drivers WHERE user_id = ?1`, userID).Scan(&firstName, &lastName, &phone, &carModel, &color, &plateNumber); err != nil {
-		log.Printf("driver: load driver info for admin approval user_id=%d: %v", userID, err)
-	} else if cfg != nil && cfg.AdminID != 0 && cfg.AdminBotToken != "" {
-		fullName := strings.TrimSpace(strings.TrimSpace(firstName.String) + " " + strings.TrimSpace(lastName.String))
-		adminText := fmt.Sprintf(
-			"🚕 Yangi haydovchi tasdiqlash uchun\n\n👤 Ism familiya: %s\n📞 Telefon: %s\n🚗 Mashina: %s\n🎨 Rang: %s\n🔢 Raqam: %s\n👤 Telegram ID: %d\n\n📄 Hujjatlar quyida",
-			fullName, phone.String, carModel.String, color.String, plateNumber.String, telegramID,
-		)
-		adminChatID := cfg.AdminID
-		adminBot, err := tgbotapi.NewBotAPI(cfg.AdminBotToken)
-		if err != nil {
-			log.Printf("driver: create admin bot for approval user_id=%d: %v", userID, err)
-		} else {
-			// Header text via admin bot
-			if _, err := adminBot.Send(tgbotapi.NewMessage(adminChatID, adminText)); err != nil {
-				log.Printf("driver: admin approval header send error user_id=%d: %v", userID, err)
-			} else {
-				log.Printf("driver: admin approval header sent user_id=%d", userID)
-			}
-
-			// Photos via admin bot: download from driver bot and re-upload as bytes.
-			if bot != nil {
-				// License photo
-				var licenseID sql.NullString
-				_ = db.QueryRowContext(ctx, `SELECT license_photo_file_id FROM drivers WHERE user_id = ?1`, userID).Scan(&licenseID)
-				if licenseID.Valid && licenseID.String != "" {
-					if f, err := bot.GetFile(tgbotapi.FileConfig{FileID: licenseID.String}); err != nil {
-						log.Printf("driver: getFile license error user_id=%d: %v", userID, err)
-					} else if f.FilePath != "" {
-						url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", cfg.DriverBotToken, f.FilePath)
-						if resp, err := http.Get(url); err != nil {
-							log.Printf("driver: download license photo error user_id=%d: %v", userID, err)
-						} else {
-							defer resp.Body.Close()
-							data, err := io.ReadAll(resp.Body)
-							if err != nil {
-								log.Printf("driver: read license photo error user_id=%d: %v", userID, err)
-							} else {
-								photo := tgbotapi.NewPhoto(adminChatID, tgbotapi.FileBytes{
-									Name:  "license.jpg",
-									Bytes: data,
-								})
-								if _, err := adminBot.Send(photo); err != nil {
-									log.Printf("driver: admin license photo send error user_id=%d: %v", userID, err)
-								} else {
-									log.Printf("driver: admin license photo sent user_id=%d", userID)
-								}
-							}
-						}
-					}
-				}
-				// Vehicle document (current fileID)
-				if f, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID}); err != nil {
-					log.Printf("driver: getFile vehicle doc error user_id=%d: %v", userID, err)
-				} else if f.FilePath != "" {
-					url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", cfg.DriverBotToken, f.FilePath)
-					if resp, err := http.Get(url); err != nil {
-						log.Printf("driver: download vehicle doc photo error user_id=%d: %v", userID, err)
-					} else {
-						defer resp.Body.Close()
-						data, err := io.ReadAll(resp.Body)
-						if err != nil {
-							log.Printf("driver: read vehicle doc photo error user_id=%d: %v", userID, err)
-						} else {
-							photo := tgbotapi.NewPhoto(adminChatID, tgbotapi.FileBytes{
-								Name:  "vehicle_doc.jpg",
-								Bytes: data,
-							})
-							if _, err := adminBot.Send(photo); err != nil {
-								log.Printf("driver: admin vehicle doc photo send error user_id=%d: %v", userID, err)
-							} else {
-								log.Printf("driver: admin vehicle doc photo sent user_id=%d", userID)
-							}
-						}
-					}
-				}
-			}
-
-			// Instruction text + inline buttons via admin bot (callbacks handled by admin bot).
-			kb := tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData("✅ Approve", fmt.Sprintf("approve_driver_%d", userID)),
-					tgbotapi.NewInlineKeyboardButtonData("❌ Reject", fmt.Sprintf("reject_driver_%d", userID)),
-				),
-			)
-			inlineMsg := tgbotapi.NewMessage(adminChatID, "Haydovchini tasdiqlang yoki rad eting.")
-			inlineMsg.ReplyMarkup = kb
-			if _, err := adminBot.Send(inlineMsg); err != nil {
-				log.Printf("driver: admin approval inline buttons send error user_id=%d: %v", userID, err)
-			} else {
-				log.Printf("driver: admin approval buttons sent via admin bot user_id=%d", userID)
-			}
-		}
+	// Require driver agreement (oferta) before sending admin approval request.
+	if !driverHasAcceptedAgreement(ctx, db, userID) {
+		sendDriverAgreement(bot, chatID)
+		// Still show the general terms once (anti-spam via users.terms_accepted flag).
+		showTermsShortOnce(bot, db, chatID, telegramID)
+		// Notify driver that we're waiting for acceptance + admin.
+		send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
+		kb := getDriverKeyboard(db, userID)
+		m := tgbotapi.NewMessage(chatID, "Tasdiqlash kutilmoqda. Holatni /status buyrug'i orqali tekshiring.")
+		m.ReplyMarkup = kb
+		_, _ = bot.Send(m)
+		return true
 	}
+
+	sendAdminApprovalRequest(ctx, bot, db, cfg, userID, telegramID)
 
 	// Notify driver.
 		send(bot, chatID, "✅ Ma’lumotlaringiz qabul qilindi.\nAdmin tasdiqlashidan so‘ng sizga xabar beriladi.")
+	showTermsShortOnce(bot, db, chatID, telegramID)
 	rewardReferrerOnApplicationComplete(bot, db, userID)
 	_, _ = db.ExecContext(ctx, `UPDATE drivers SET balance = balance + 100000, signup_bonus_paid = 1 WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, userID)
 	kb := getDriverKeyboard(db, userID)
@@ -983,6 +948,108 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 	m.ReplyMarkup = kb
 	_, _ = bot.Send(m)
 	return true
+}
+
+func sendAdminApprovalRequest(ctx context.Context, bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, userID int64, telegramID int64) {
+	// Load driver info for admin approval request.
+	var firstName, lastName, phone, carModel, color, plateNumber sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(first_name, ''), COALESCE(last_name, ''), COALESCE(phone, ''), COALESCE(car_type, ''), COALESCE(color, ''), COALESCE(plate_number, '')
+		FROM drivers WHERE user_id = ?1`, userID).Scan(&firstName, &lastName, &phone, &carModel, &color, &plateNumber); err != nil {
+		log.Printf("driver: load driver info for admin approval user_id=%d: %v", userID, err)
+		return
+	}
+	if cfg == nil || cfg.AdminID == 0 || cfg.AdminBotToken == "" {
+		return
+	}
+	fullName := strings.TrimSpace(strings.TrimSpace(firstName.String) + " " + strings.TrimSpace(lastName.String))
+	adminText := fmt.Sprintf(
+		"🚕 Yangi haydovchi tasdiqlash uchun\n\n👤 Ism familiya: %s\n📞 Telefon: %s\n🚗 Mashina: %s\n🎨 Rang: %s\n🔢 Raqam: %s\n👤 Telegram ID: %d\n\n📄 Hujjatlar quyida",
+		fullName, phone.String, carModel.String, color.String, plateNumber.String, telegramID,
+	)
+	adminChatID := cfg.AdminID
+	adminBot, err := tgbotapi.NewBotAPI(cfg.AdminBotToken)
+	if err != nil {
+		log.Printf("driver: create admin bot for approval user_id=%d: %v", userID, err)
+		return
+	}
+	// Header text via admin bot
+	if _, err := adminBot.Send(tgbotapi.NewMessage(adminChatID, adminText)); err != nil {
+		log.Printf("driver: admin approval header send error user_id=%d: %v", userID, err)
+	} else {
+		log.Printf("driver: admin approval header sent user_id=%d", userID)
+	}
+
+	// Photos via admin bot: download from driver bot and re-upload as bytes.
+	if bot != nil {
+		// License photo
+		var licenseID sql.NullString
+		_ = db.QueryRowContext(ctx, `SELECT license_photo_file_id FROM drivers WHERE user_id = ?1`, userID).Scan(&licenseID)
+		if licenseID.Valid && licenseID.String != "" {
+			if f, err := bot.GetFile(tgbotapi.FileConfig{FileID: licenseID.String}); err != nil {
+				log.Printf("driver: getFile license error user_id=%d: %v", userID, err)
+			} else if f.FilePath != "" {
+				url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", cfg.DriverBotToken, f.FilePath)
+				if resp, err := http.Get(url); err != nil {
+					log.Printf("driver: download license photo error user_id=%d: %v", userID, err)
+				} else {
+					defer resp.Body.Close()
+					data, err := io.ReadAll(resp.Body)
+					if err != nil {
+						log.Printf("driver: read license photo error user_id=%d: %v", userID, err)
+					} else {
+						photo := tgbotapi.NewPhoto(adminChatID, tgbotapi.FileBytes{Name: "license.jpg", Bytes: data})
+						if _, err := adminBot.Send(photo); err != nil {
+							log.Printf("driver: admin license photo send error user_id=%d: %v", userID, err)
+						} else {
+							log.Printf("driver: admin license photo sent user_id=%d", userID)
+						}
+					}
+				}
+			}
+		}
+		// Vehicle document
+		var vehicleID sql.NullString
+		_ = db.QueryRowContext(ctx, `SELECT vehicle_doc_file_id FROM drivers WHERE user_id = ?1`, userID).Scan(&vehicleID)
+		if vehicleID.Valid && vehicleID.String != "" {
+			if f, err := bot.GetFile(tgbotapi.FileConfig{FileID: vehicleID.String}); err != nil {
+				log.Printf("driver: getFile vehicle doc error user_id=%d: %v", userID, err)
+			} else if f.FilePath != "" {
+				url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", cfg.DriverBotToken, f.FilePath)
+				if resp, err := http.Get(url); err != nil {
+					log.Printf("driver: download vehicle doc photo error user_id=%d: %v", userID, err)
+				} else {
+					defer resp.Body.Close()
+					data, err := io.ReadAll(resp.Body)
+					if err != nil {
+						log.Printf("driver: read vehicle doc photo error user_id=%d: %v", userID, err)
+					} else {
+						photo := tgbotapi.NewPhoto(adminChatID, tgbotapi.FileBytes{Name: "vehicle_doc.jpg", Bytes: data})
+						if _, err := adminBot.Send(photo); err != nil {
+							log.Printf("driver: admin vehicle doc photo send error user_id=%d: %v", userID, err)
+						} else {
+							log.Printf("driver: admin vehicle doc photo sent user_id=%d", userID)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Instruction text + inline buttons via admin bot (callbacks handled by admin bot).
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Approve", fmt.Sprintf("approve_driver_%d", userID)),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Reject", fmt.Sprintf("reject_driver_%d", userID)),
+		),
+	)
+	inlineMsg := tgbotapi.NewMessage(adminChatID, "Haydovchini tasdiqlang yoki rad eting.")
+	inlineMsg.ReplyMarkup = kb
+	if _, err := adminBot.Send(inlineMsg); err != nil {
+		log.Printf("driver: admin approval inline buttons send error user_id=%d: %v", userID, err)
+	} else {
+		log.Printf("driver: admin approval buttons sent via admin bot user_id=%d", userID)
+	}
 }
 
 func handleApplicationText(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64, text string) bool {
@@ -1121,6 +1188,12 @@ func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 			if _, err := bot.Send(m); err != nil {
 				log.Printf("driver: send pending verification online message: %v", err)
 			}
+			return
+		}
+		// Block until agreement accepted.
+		if !driverHasAcceptedAgreement(ctx, db, userID) {
+			send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
+			sendDriverAgreement(bot, chatID)
 			return
 		}
 	}
@@ -1391,6 +1464,12 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID); err != nil {
 			return
 		}
+		// Block until agreement accepted.
+		if !driverHasAcceptedAgreement(ctx, db, userID) {
+			send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
+			sendDriverAgreement(bot, chatID)
+			return
+		}
 		_, _ = db.ExecContext(ctx, `UPDATE drivers SET live_location_active = 0, last_live_location_at = NULL WHERE user_id = ?1`, userID)
 		log.Printf("driver: live_location end user_id=%d", userID)
 		sendOrUpdatePinnedStatus(bot, db, chatID, userID)
@@ -1409,6 +1488,12 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		if err != sql.ErrNoRows {
 			log.Printf("driver: get user (live): %v", err)
 		}
+		return
+	}
+	// Block until agreement accepted.
+	if !driverHasAcceptedAgreement(ctx, db, userID) {
+		send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
+		sendDriverAgreement(bot, chatID)
 		return
 	}
 	var verificationStatus sql.NullString
@@ -1544,6 +1629,35 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, assign
 	chatID := q.Message.Chat.ID
 	telegramID := q.From.ID
 	data := q.Data
+
+	if data == cbDriverAcceptTerms {
+		ctx := context.Background()
+		var userID int64
+		if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID); err != nil || userID == 0 {
+			return
+		}
+		// Idempotent accept: only proceed when we flipped 0->1.
+		res, err := db.ExecContext(ctx, `UPDATE drivers SET terms_accepted = 1 WHERE user_id = ?1 AND COALESCE(terms_accepted, 0) = 0`, userID)
+		if err != nil {
+			log.Printf("driver: accept agreement update error user_id=%d: %v", userID, err)
+		}
+		affected := int64(0)
+		if res != nil {
+			affected, _ = res.RowsAffected()
+		}
+		_, _ = bot.Request(tgbotapi.NewCallback(q.ID, ""))
+		if affected == 0 {
+			// Already accepted; do not resend admin request.
+			send(bot, chatID, "✅ Shartnoma qabul qilingan.")
+			return
+		}
+		send(bot, chatID, "✅ Shartnoma qabul qilindi.\n\nMa'lumotlaringiz admin tomonidan tekshiriladi.")
+		// Show general platform terms once (anti-spam via users.terms_accepted).
+		showTermsShortOnce(bot, db, chatID, telegramID)
+		// Continue normal flow: send admin approval request now that agreement is accepted.
+		sendAdminApprovalRequest(ctx, bot, db, cfg, userID, telegramID)
+		return
+	}
 
 	if strings.HasPrefix(data, cbAccept) {
 		requestID := strings.TrimPrefix(data, cbAccept)

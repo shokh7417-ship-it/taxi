@@ -13,6 +13,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/domain"
+	"taxi-mvp/internal/legal"
 	"taxi-mvp/internal/services"
 	"taxi-mvp/internal/utils"
 )
@@ -120,6 +121,10 @@ func handleUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 		handleStart(bot, db, chatID, telegramID, referredBy)
 		return
 	}
+	if msg.Command() == "terms" {
+		send(bot, chatID, legal.TermsFullMessage)
+		return
+	}
 	if msg.Command() == "cancel" {
 		handleCancel(bot, db, cfg, tripService, chatID, telegramID)
 		return
@@ -158,6 +163,7 @@ func setBotCommands(bot *tgbotapi.BotAPI) {
 	cmd := tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "start", Description: "Bosh menyu"},
 		tgbotapi.BotCommand{Command: "cancel", Description: "Bekor qilish"},
+		tgbotapi.BotCommand{Command: "terms", Description: "Foydalanish qoidalari"},
 	)
 	if _, err := bot.Request(cmd); err != nil {
 		log.Printf("rider bot: SetMyCommands: %v", err)
@@ -204,6 +210,23 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, chatID int64, telegramID int6
 		return
 	}
 	sendMainMenu(bot, chatID)
+	showTermsShortOnce(bot, db, chatID, telegramID)
+}
+
+func showTermsShortOnce(bot *tgbotapi.BotAPI, db *sql.DB, chatID, telegramID int64) {
+	ctx := context.Background()
+	var termsAccepted int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(terms_accepted, 0) FROM users WHERE telegram_id = ?1`, telegramID).Scan(&termsAccepted); err != nil {
+		return
+	}
+	if termsAccepted != 0 {
+		return
+	}
+	if _, err := bot.Send(tgbotapi.NewMessage(chatID, legal.TermsShortMessage)); err != nil {
+		log.Printf("rider: send terms short: %v", err)
+		return
+	}
+	_, _ = db.ExecContext(ctx, `UPDATE users SET terms_accepted = 1 WHERE telegram_id = ?1`, telegramID)
 }
 
 // sendMainMenu shows the persistent main menu: Taxi chaqirish, Yordam.
