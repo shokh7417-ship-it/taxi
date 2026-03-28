@@ -204,6 +204,10 @@ Trip fare is computed from distance and `PRICE_PER_KM` (from `.env`):
 
 ## Developer notes
 
+### Legal DB schema (`document_type`)
+
+If logs show `no such column: document_type` on `legal_documents`, the database has an incompatible older `legal_*` layout (or a partial deploy). Run migrations through **`034_legal_documents_schema_rebuild.sql`**, which drops and recreates `legal_documents`, `legal_acceptances`, and `legal_pending_resume` with the schema the app expects. **Legal acceptance rows are cleared**; users/drivers accept again after migrate.
+
 ### Driver legal re-accept and live location
 
 When a driver must re-accept legal documents while they were **online** and/or **sharing Telegram live location**, the bot stores a `driver_relive` resume intent. After acceptance, the driver is **not** marked online automatically: we clear `is_active`, `live_location_active`, and `last_live_location_at` so dispatch state matches reality.
