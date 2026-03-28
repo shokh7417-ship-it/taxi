@@ -201,14 +201,13 @@ Trip fare is computed from distance and `PRICE_PER_KM` (from `.env`):
 7. **Shutdown**  
    - Send SIGINT/SIGTERM to the app (e.g. Ctrl+C).  
    - Verify both bots stop and the process exits without errors (graceful shutdown).
-#   t a x i - s e r v i c e - o n - t e l e g r a m 
- 
- #   t a x i - s e r v i c e - o n - t e l e g r a m  
- #   t a x i - s e r v i c e - o n - t e l e g r a m  
- #   t a x i - s e r v i c e - o n - t e l e g r a m  
- #   t a x i  
- #   t a x i  
- #   t a x i  
- #   t a x i  
- #   t a x i  
- 
+
+## Developer notes
+
+### Driver legal re-accept and live location
+
+When a driver must re-accept legal documents while they were **online** and/or **sharing Telegram live location**, the bot stores a `driver_relive` resume intent. After acceptance, the driver is **not** marked online automatically: we clear `is_active`, `live_location_active`, and `last_live_location_at` so dispatch state matches reality.
+
+The driver then sees an explicit Uzbek message that **live location must be shared again manually** in Telegram (Share Live Location), followed by the existing live-location instruction flow (keyboard + steps). This is required because **Telegram does not allow the bot or server to resume a live location session** after interruption, and it keeps legal/operational state consistent.
+
+Cold “go online” after legal (driver was offline and not sharing live) still uses the `driver_online` resume path and `handleOnline` as before.

@@ -37,6 +37,8 @@ const (
 
 	resumeDriverOnline = "driver_online"
 	resumeDriverAccept = "driver_accept"
+	// resumeDriverRelive: driver was online and/or sharing live location when legal blocked them; Telegram cannot auto-resume live — user must re-share.
+	resumeDriverRelive = "driver_relive"
 
 	// Live Location = only edited_message.location updates; active only when last_live_location_at within 90s.
 	liveLocationActiveSeconds = 90
@@ -104,6 +106,33 @@ func driverLegalAllowsLiveSharing(ctx context.Context, db *sql.DB, userID int64)
 
 func driverHasAcceptedAgreement(ctx context.Context, db *sql.DB, userID int64) bool {
 	return legal.NewService(db).DriverHasActiveLegal(ctx, userID)
+}
+
+// driverWasOnlineOrLiveIntent is true when DB indicates the driver was operating as online and/or sharing live location (legal re-accept must not imply they can continue without re-sharing live in Telegram).
+func driverWasOnlineOrLiveIntent(ctx context.Context, db *sql.DB, userID int64) bool {
+	var liveAct, isAct int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(live_location_active, 0), COALESCE(is_active, 0)
+		FROM drivers WHERE user_id = ?1`, userID).Scan(&liveAct, &isAct); err != nil {
+		return false
+	}
+	return liveAct == 1 || isAct == 1
+}
+
+func resetDriverLiveOnlineStateForLegalRelive(ctx context.Context, db *sql.DB, userID int64) {
+	_, _ = db.ExecContext(ctx, `
+		UPDATE drivers SET is_active = 0, live_location_active = 0, last_live_location_at = NULL
+		WHERE user_id = ?1`, userID)
+}
+
+func postLegalReliveMessage(pendingRequestID string) string {
+	s := "Yangi qoidalar qabul qilindi ✅\n\n" +
+		"Ishni davom ettirish uchun jonli lokatsiyani qayta yuboring.\n\n" +
+		"Telegram jonli lokatsiyani avtomatik tiklay olmaydi. " + liveLocationBilingualInstruction + " orqali qayta ulashing."
+	if strings.TrimSpace(pendingRequestID) != "" {
+		s += "\n\nBuyurtmani qabul qilishdan oldin ham jonli lokatsiyani ulashing — so'rov muddati tugashidan oldin qayta urinib ko'ring."
+	}
+	return s
 }
 var (
 	carTypes = []string{"Cobalt", "Nexia", "Nexia 2", "Nexia 3", "Matiz", "Gentra", "Lacetti", "Malibu", "BYD", "Lada", "Damas", carTypeBoshqa}
@@ -1199,7 +1228,12 @@ func handleOnline(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchSer
 			return
 		}
 		if !driverHasAcceptedAgreement(ctx, db, userID) {
-			_ = legal.NewService(db).SetPendingResume(ctx, userID, resumeDriverOnline, "")
+			lSvc := legal.NewService(db)
+			if driverWasOnlineOrLiveIntent(ctx, db, userID) {
+				_ = lSvc.SetPendingResume(ctx, userID, resumeDriverRelive, "")
+			} else {
+				_ = lSvc.SetPendingResume(ctx, userID, resumeDriverOnline, "")
+			}
 			sendDriverAgreement(bot, db, chatID)
 			send(bot, chatID, "⚠️ Avval barcha hujjatlarni qabul qilishingiz kerak.")
 			return
@@ -1498,6 +1532,7 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		return
 	}
 	if !driverLegalAllowsLiveSharing(ctx, db, userID) {
+		_ = legal.NewService(db).SetPendingResume(ctx, userID, resumeDriverRelive, "")
 		sendDriverAgreement(bot, db, chatID)
 		send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
 		return
@@ -1657,8 +1692,15 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 		}
 		_, _ = bot.Request(tgbotapi.NewCallback(q.ID, ""))
 		kind, payload, ok := lSvc.TakePendingResume(ctx, userID)
+		processedRelive := false
 		if ok {
 			switch kind {
+			case resumeDriverRelive:
+				processedRelive = true
+				resetDriverLiveOnlineStateForLegalRelive(ctx, db, userID)
+				sendOrUpdatePinnedStatus(bot, db, chatID, userID)
+				send(bot, chatID, postLegalReliveMessage(payload))
+				handleLiveLocationInstruction(bot, db, chatID, telegramID)
 			case resumeDriverOnline:
 				handleOnline(bot, db, cfg, matchService, chatID, telegramID)
 			case resumeDriverAccept:
@@ -1671,6 +1713,23 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 		var st sql.NullString
 		_ = db.QueryRowContext(ctx, `SELECT verification_status FROM drivers WHERE user_id = ?1`, userID).Scan(&st)
 		stStr := strings.TrimSpace(st.String)
+		if processedRelive {
+			if !before {
+				kb := getDriverKeyboard(db, userID)
+				m := tgbotapi.NewMessage(chatID, "Tasdiqlash kutilmoqda. Holatni /status buyrug'i orqali tekshiring.")
+				m.ReplyMarkup = kb
+				_, _ = bot.Send(m)
+				sendAdminApprovalRequest(ctx, bot, db, cfg, userID, telegramID)
+				return
+			}
+			if stStr == "pending_approval" {
+				sendAdminApprovalRequest(ctx, bot, db, cfg, userID, telegramID)
+				send(bot, chatID, "✅ Shartnoma qabul qilingan.\n\nArizangiz adminga yuborildi.")
+				return
+			}
+			send(bot, chatID, "✅ Qoidalar qabul qilingan.")
+			return
+		}
 		if before {
 			if stStr == "pending_approval" {
 				sendAdminApprovalRequest(ctx, bot, db, cfg, userID, telegramID)
@@ -1775,7 +1834,12 @@ func handleAccept(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, assignme
 		return
 	}
 	if !legal.NewService(db).DriverHasActiveLegal(ctx, userID) {
-		_ = legal.NewService(db).SetPendingResume(ctx, userID, resumeDriverAccept, requestID)
+		lSvc := legal.NewService(db)
+		if driverWasOnlineOrLiveIntent(ctx, db, userID) {
+			_ = lSvc.SetPendingResume(ctx, userID, resumeDriverRelive, requestID)
+		} else {
+			_ = lSvc.SetPendingResume(ctx, userID, resumeDriverAccept, requestID)
+		}
 		sendDriverAgreement(bot, db, chatID)
 		send(bot, chatID, "⚠️ Buyurtma qabul qilish uchun avval barcha hujjatlarni qabul qiling.")
 		return

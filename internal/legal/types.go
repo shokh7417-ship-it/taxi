@@ -1,13 +1,14 @@
 package legal
 
 // Document types stored in legal_documents / legal_acceptances.
+// legal_pending_resume.kind values are defined in bots (e.g. driver_relive = re-share live location after legal interrupt while online/live).
 const (
-	DocDriverTerms    = "driver_terms"
-	DocUserTerms      = "user_terms"
-	DocPrivacyPolicy  = "privacy_policy"
-	ErrCodeRequired   = "LEGAL_ACCEPTANCE_REQUIRED"
-	RiderDocTypes     = 2
-	DriverDocTypes    = 3
+	DocDriverTerms   = "driver_terms"
+	DocUserTerms     = "user_terms"
+	DocPrivacyPolicy = "privacy_policy"
+	ErrCodeRequired  = "LEGAL_ACCEPTANCE_REQUIRED"
+	RiderDocTypes    = 2
+	DriverDocTypes   = 3
 )
 
 // SQLDriverDispatchLegalOK is appended to driver dispatch queries: requires all three active acceptances.
