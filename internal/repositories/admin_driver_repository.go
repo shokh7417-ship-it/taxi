@@ -165,7 +165,7 @@ func (r *adminDriverRepo) SetDriverBalance(ctx context.Context, id int64, newBal
 func (r *adminDriverRepo) UpdateVerificationStatus(ctx context.Context, driverUserID int64, status string) error {
 	if status == "rejected" {
 		_, err := r.db.ExecContext(ctx, `
-			UPDATE drivers SET verification_status = 'rejected', license_photo_file_id = NULL, vehicle_doc_file_id = NULL, application_step = 'license_photo' WHERE user_id = ?1`, driverUserID)
+			UPDATE drivers SET verification_status = 'rejected', license_photo_file_id = NULL, vehicle_doc_file_id = NULL, application_step = 'license_photo', application_admin_sent = 0 WHERE user_id = ?1`, driverUserID)
 		return err
 	}
 	_, err := r.db.ExecContext(ctx, `UPDATE drivers SET verification_status = ?1 WHERE user_id = ?2`, status, driverUserID)

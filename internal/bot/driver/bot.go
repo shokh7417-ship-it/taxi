@@ -984,6 +984,12 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 }
 
 func sendAdminApprovalRequest(ctx context.Context, bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, userID int64, telegramID int64) {
+	var alreadySent int
+	_ = db.QueryRowContext(ctx, `SELECT COALESCE(application_admin_sent, 0) FROM drivers WHERE user_id = ?1`, userID).Scan(&alreadySent)
+	if alreadySent != 0 {
+		log.Printf("driver: skip duplicate admin application packet user_id=%d", userID)
+		return
+	}
 	// Load driver info for admin approval request.
 	var firstName, lastName, phone, carModel, color, plateNumber sql.NullString
 	if err := db.QueryRowContext(ctx, `
@@ -1082,6 +1088,9 @@ func sendAdminApprovalRequest(ctx context.Context, bot *tgbotapi.BotAPI, db *sql
 		log.Printf("driver: admin approval inline buttons send error user_id=%d: %v", userID, err)
 	} else {
 		log.Printf("driver: admin approval buttons sent via admin bot user_id=%d", userID)
+		if _, err := db.ExecContext(ctx, `UPDATE drivers SET application_admin_sent = 1 WHERE user_id = ?1`, userID); err != nil {
+			log.Printf("driver: set application_admin_sent user_id=%d: %v", userID, err)
+		}
 	}
 }
 
@@ -1700,7 +1709,7 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 			}
 			_, _ = db.ExecContext(ctx, `UPDATE drivers SET approval_notified = 1 WHERE user_id = ?1`, driverUserID)
 		case strings.HasPrefix(data, "reject_driver_"):
-			if _, err := db.ExecContext(ctx, `UPDATE drivers SET verification_status = 'rejected', license_photo_file_id = NULL, vehicle_doc_file_id = NULL, application_step = 'license_photo' WHERE user_id = ?1 AND verification_status != 'approved'`, driverUserID); err != nil {
+			if _, err := db.ExecContext(ctx, `UPDATE drivers SET verification_status = 'rejected', license_photo_file_id = NULL, vehicle_doc_file_id = NULL, application_step = 'license_photo', application_admin_sent = 0 WHERE user_id = ?1 AND verification_status != 'approved'`, driverUserID); err != nil {
 				log.Printf("driver: reject driver update error user_id=%d: %v", driverUserID, err)
 			} else {
 				log.Printf("driver: driver rejected by admin user_id=%d", driverUserID)
