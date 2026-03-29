@@ -101,7 +101,7 @@ Notable migration themes:
 | Area | Examples |
 |------|----------|
 | Drivers / verification | `025_driver_verification.sql`, application steps, legal fingerprints |
-| Promo / ledger | `035_driver_promo_cash_ledger.sql`; `038` first-3-trip ledger uniqueness; `040` referral ledger uniqueness |
+| Promo / ledger | `035_driver_promo_cash_ledger.sql`; `038` first-3-trip ledger uniqueness; `040` referral ledger uniqueness; **`042_driver_ledger_unique_driver_ref.sql`** — global **`UNIQUE (driver_id, reference_type, reference_id)`** on **`driver_ledger`**, with an **Up** step that backfills legacy **commission** rows (`reference_type = 'trip'`) so each line uses **`reference_id = '<trip_id>:' || entry_type`** before the index is created (re-run safe for already-normalized rows) |
 | Referrals | `017_referral_fields.sql`, `019_driver_referral_reward_stages.sql`, **`039_driver_referrals.sql`** |
 | Legal | `034_legal_documents_schema_rebuild.sql` and later legal admin versions |
 | Trips | **`041_trips_arrived_status.sql`** — adds **`ARRIVED`** trip status and **`arrived_at`** (pickup-before-start flow) |
@@ -130,7 +130,7 @@ Driver routes use **`tryDriverID`** then **`RequireDriverAuth`** (Telegram initD
 | `POST` | `/driver/location` | Driver location ping (map tracking; **live location** drives dispatch) |
 | `POST` | `/trip/arrived` | **`WAITING` → `ARRIVED`**: server checks pickup distance + fresh Telegram live location (same rules as starting from `WAITING`). Optional explicit “at pickup” step. Body: `{ "trip_id" }`. |
 | `POST` | `/trip/start` | **`WAITING` or `ARRIVED` → `STARTED`**. From **`WAITING`**, server enforces near-pickup + live location (do not rely on Mini App alone). From **`ARRIVED`**, proximity is **not** re-checked. Distance/fare accumulation still only after **`STARTED`**. On failure: e.g. too early → **400** with Uzbek message *“Mijozga hali yetib bormagansiz…”* |
-| `POST` | `/trip/finish` | Finish trip (triggers promos, referral reward evaluation, commission) |
+| `POST` | `/trip/finish` | Finish trip: **trip → `FINISHED`**, first-3 promo, referral check, and **commission** run in **one DB transaction**; if any of those steps fails, the transaction rolls back (trip stays non-**`FINISHED`**). **Telegram** notifications run **after** a successful commit. |
 | `POST` | `/trip/cancel/driver` | Driver cancel |
 | `POST` | `/trip/cancel/rider` | Rider cancel (`riderAuth`) |
 | `GET` | `/driver/referral-link` | JSON `{ "referral_link": "..." }` |
@@ -178,6 +178,7 @@ You deploy **(A)** static Mini App and **(B)** one **backend** process talking t
 | Symptom | Likely cause | Fix |
 |---------|----------------|-----|
 | `no such table: ...` | Empty DB / migrations not applied | Run `go run ./cmd/migrate -up` with production DB URL |
+| `UNIQUE constraint failed` on **`042_driver_ledger_unique_driver_ref`** | Old DBs had several **commission** ledger rows per trip with the same **`reference_type` / `reference_id`** | Use the **current** `042` from this repo: it **normalizes** those rows **before** `CREATE UNIQUE INDEX`. Redeploy after pull; do not drop the backfill `UPDATE` steps from `042`. |
 | `getUpdates` conflict | Two replicas or local + cloud | Single instance; stop duplicate processes |
 | Render build cache errors | Stale cache | Clear build cache, redeploy |
 
@@ -203,7 +204,7 @@ You deploy **(A)** static Mini App and **(B)** one **backend** process talking t
 ## Fare and commission
 
 - **Fare:** Distance-based; may use **`FareService`** DB settings when present, otherwise config **`STARTING_FEE`** / **`PRICE_PER_KM`** (and rounding rules in code).
-- **Commission:** On **FINISHED** trips, internal **`COMMISSION_ACCRUED`** and offsets **`PROMO_APPLIED_TO_COMMISSION`** / **`CASH_APPLIED_TO_COMMISSION`** in **`driver_ledger`** — **not** bank settlement. Legacy **`payments`** rows may still be written for admin views; **ledger is authoritative** for bucket behavior.
+- **Commission:** Applied inside the same **`FinishTrip`** DB transaction as the status flip and promo/referral steps (so a failed commission write rolls the trip back from **`FINISHED`**). Ledger rows use **`reference_type = 'trip'`** and **`reference_id = '<trip_id>:' || entry_type`** (e.g. **`…:COMMISSION_ACCRUED`**) so each line is unique under **`042`**. Accrual and offsets **`PROMO_APPLIED_TO_COMMISSION`** / **`CASH_APPLIED_TO_COMMISSION`** are **not** bank settlement. Legacy **`payments`** rows may still be written for admin views; **ledger is authoritative** for bucket behavior.
 
 ---
 
@@ -216,7 +217,7 @@ All amounts below are **promo platform credit** unless stated otherwise: **not r
 | Rule | Amount | Idempotency |
 |------|--------|-------------|
 | Once on **approval** | **+20 000** promo | `signup_bonus_paid` + ledger `signup_promo` |
-| **1st / 2nd / 3rd** finished trip | **+10 000** each | Ledger `first_3_trip_bonus` + unique `(driver_id, trip_id)` |
+| **1st / 2nd / 3rd** finished trip | **+10 000** each | Ledger `first_3_trip_bonus` + **`UNIQUE (driver_id, reference_type, reference_id)`** + **`INSERT OR IGNORE`** (`reference_id` = trip id) |
 
 **Code:** `internal/accounting/driver_promo.go`, **`GET /driver/promo-program`**.
 
@@ -224,11 +225,11 @@ All amounts below are **promo platform credit** unless stated otherwise: **not r
 
 | Rule | Amount | Idempotency |
 |------|--------|-------------|
-| Referred driver completes **3** trips **FINISHED**, **`verification_status = approved`** | Inviter **+20 000** promo | `users.referral_stage2_reward_paid` on **referred** user + ledger `referral_reward` + unique index |
+| Referred driver completes **3** trips **FINISHED**, **`verification_status = approved`** | Inviter **+20 000** promo | `users.referral_stage2_reward_paid` on **referred** user + ledger `referral_reward` + **`INSERT OR IGNORE`** on the same **unique** ledger key |
 
 - **Relation:** **`driver_referrals`** (`inviter_user_id`, **`referred_user_id` UNIQUE**), backfilled from `users.referred_by` / `referral_code`.
-- **Trigger:** only **`TripService.FinishTrip`** after successful status transition to FINISHED.
-- **Telegram** to inviter: **only after** DB commit with updated **`promo_balance`**.
+- **Trigger:** **`TripService.FinishTrip`** — first-3 promo, referral grant, and commission run in the **same transaction** as setting the trip to **`FINISHED`**. If any step errors, the whole transaction rolls back.
+- **Telegram** to inviter (and other finish notifications): **only after** a successful **commit**.
 
 **Code:** `internal/accounting/referral_reward.go`, **`GET /driver/referral-status`**.
 
@@ -243,7 +244,7 @@ All amounts below are **promo platform credit** unless stated otherwise: **not r
 | `signup_promo` | Approval onboarding grant |
 | `first_3_trip_bonus` | Per-trip bonus, `reference_id` = trip id |
 | `referral_reward` | Inviter reward, `reference_id` = referred **user** id (string) |
-| `trip` | Commission accrual / offsets (see entry types) |
+| `trip` | Commission accrual / offsets; `reference_id` is **`<trip_id>:<ENTRY_TYPE>`** (e.g. `abc123:COMMISSION_ACCRUED`) |
 
 ---
 
@@ -277,6 +278,11 @@ Admin routes (drivers, riders, payments, verification) are registered from **`ha
 ### Schema drift helpers
 
 - **`internal/db/legalrepair`**, **`legalfingerrepair`**, **`ledgerrepair`** — run at startup to align common drift (never substitute for running **goose** migrations on new environments).
+
+### Finish trip atomicity
+
+- **`internal/services/trip_service.go`** (`FinishTrip`) and **`internal/accounting/trip_finish_grants.go`** / **`wallet.go`** — one **`sql.Tx`** for **finish → effects**; Telegram side effects stay outside the transaction.
+- Tests: **`internal/accounting/trip_finish_atomic_test.go`** (simulated failures for promo / referral / commission rollback; success path commits all effects).
 
 ### Further reading
 
