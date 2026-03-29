@@ -23,12 +23,25 @@ func (r *TripRepo) GetStatus(ctx context.Context, tripID string) (status string,
 	return status, err
 }
 
-// UpdateToStarted sets status = STARTED, started_at = now() only when status = WAITING and driver matches. Returns rows affected.
+// UpdateToArrived sets status = ARRIVED, arrived_at = now() only when status = WAITING and driver matches.
+func (r *TripRepo) UpdateToArrived(ctx context.Context, tripID string, driverUserID int64) (rowsAffected int64, err error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE trips SET status = ?1, arrived_at = datetime('now')
+		WHERE id = ?2 AND driver_user_id = ?3 AND status = ?4`,
+		domain.TripStatusArrived, tripID, driverUserID, domain.TripStatusWaiting)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// UpdateToStarted sets status = STARTED, started_at = now() when status is WAITING or ARRIVED and driver matches.
 func (r *TripRepo) UpdateToStarted(ctx context.Context, tripID string, driverUserID int64) (rowsAffected int64, err error) {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE trips SET status = ?1, started_at = datetime('now')
-		WHERE id = ?2 AND driver_user_id = ?3 AND status = ?4`,
-		domain.TripStatusStarted, tripID, driverUserID, domain.TripStatusWaiting)
+		WHERE id = ?2 AND driver_user_id = ?3 AND status IN (?4, ?5)`,
+		domain.TripStatusStarted, tripID, driverUserID, domain.TripStatusWaiting, domain.TripStatusArrived)
 	if err != nil {
 		return 0, err
 	}
@@ -76,8 +89,8 @@ func (r *TripRepo) CancelByDriver(ctx context.Context, tripID string, driverUser
 	}
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE trips SET status = ?1, cancelled_at = datetime('now'), cancelled_by = ?2, cancel_reason = ?3
-		WHERE id = ?4 AND driver_user_id = ?5 AND status IN (?6, ?7)`,
-		domain.TripStatusCancelledByDriver, "driver", reason, tripID, driverUserID, domain.TripStatusWaiting, domain.TripStatusStarted)
+		WHERE id = ?4 AND driver_user_id = ?5 AND status IN (?6, ?7, ?8)`,
+		domain.TripStatusCancelledByDriver, "driver", reason, tripID, driverUserID, domain.TripStatusWaiting, domain.TripStatusArrived, domain.TripStatusStarted)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -97,8 +110,8 @@ func (r *TripRepo) CancelByRider(ctx context.Context, tripID string, riderUserID
 	}
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE trips SET status = ?1, cancelled_at = datetime('now'), cancelled_by = ?2, cancel_reason = ?3
-		WHERE id = ?4 AND rider_user_id = ?5 AND status IN (?6, ?7)`,
-		domain.TripStatusCancelledByRider, "rider", reason, tripID, riderUserID, domain.TripStatusWaiting, domain.TripStatusStarted)
+		WHERE id = ?4 AND rider_user_id = ?5 AND status IN (?6, ?7, ?8)`,
+		domain.TripStatusCancelledByRider, "rider", reason, tripID, riderUserID, domain.TripStatusWaiting, domain.TripStatusArrived, domain.TripStatusStarted)
 	if err != nil {
 		return 0, 0, err
 	}

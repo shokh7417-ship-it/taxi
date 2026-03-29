@@ -43,6 +43,7 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	// Mini App: try X-Driver-Id first so Start/Cancel/Finish work without initData when header is present
 	r.POST("/driver/location", tryDriverID, driverAuth, handlers.DriverLocation(db, tripSvc, matchSvc, driverBot, hub, cfg, fareSvc))
 	r.POST("/trip/start", tryDriverID, driverAuth, handlers.TripStart(db, tripSvc))
+	r.POST("/trip/arrived", tryDriverID, driverAuth, handlers.TripArrived(db, tripSvc))
 	r.POST("/trip/finish", tryDriverID, driverAuth, handlers.TripFinish(db, tripSvc))
 	r.POST("/trip/cancel/driver", tryDriverID, driverAuth, handlers.TripCancelDriver(db, tripSvc))
 	r.GET("/driver/referral-link", tryDriverID, driverAuth, handlers.DriverReferralLink(db, driverBot))

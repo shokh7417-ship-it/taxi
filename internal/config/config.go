@@ -34,6 +34,8 @@ type Config struct {
 	// Dispatch tuning: priority queue (one driver at a time, then next after timeout)
 	DispatchWaitSeconds         int // Seconds to wait for a driver batch to accept before trying next (e.g. 60)
 	DispatchDriverCooldownSec   int // Cooldown before sending another request to the same driver (e.g. 5–10)
+	// PickupStartMaxMeters: driver must be within this distance of pickup to start from WAITING (or to mark ARRIVED).
+	PickupStartMaxMeters int
 }
 
 // Load reads .env (if present) and builds Config from env with defaults.
@@ -48,6 +50,7 @@ func Load() (*Config, error) {
 	requestExpires, _ := strconv.Atoi(getEnv("REQUEST_EXPIRES_SECONDS", "120")) // 2 min TTL: request no longer sent after this
 	driverSeen, _ := strconv.Atoi(getEnv("DRIVER_SEEN_SECONDS", "600")) // 10 min: orders pushed to drivers seen in last 10 min
 	startReminder, _ := strconv.Atoi(getEnv("START_REMINDER_SECONDS", "60"))
+	pickupStartMaxM, _ := strconv.Atoi(getEnv("PICKUP_START_MAX_METERS", "100"))
 
 	cfg := &Config{
 		RiderBotToken:          getEnv("RIDER_BOT_TOKEN", ""),
@@ -72,6 +75,7 @@ func Load() (*Config, error) {
 		DispatchDebug:            getEnv("DISPATCH_DEBUG", "") == "true" || getEnv("DISPATCH_DEBUG", "") == "1",
 		DispatchWaitSeconds:       getEnvInt("DISPATCH_WAIT_SECONDS", 60),
 		DispatchDriverCooldownSec: getEnvInt("DISPATCH_DRIVER_COOLDOWN_SECONDS", 5),
+		PickupStartMaxMeters:      pickupStartMaxM,
 	}
 
 	if cfg.RiderBotToken == "" {

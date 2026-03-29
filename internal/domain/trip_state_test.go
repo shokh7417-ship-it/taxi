@@ -12,9 +12,15 @@ func TestCanTransition(t *testing.T) {
 		to   string
 		want bool
 	}{
+		{"WAITING->ARRIVED", TripStatusWaiting, TripStatusArrived, true},
 		{"WAITING->STARTED", TripStatusWaiting, TripStatusStarted, true},
 		{"WAITING->CANCELLED_BY_DRIVER", TripStatusWaiting, TripStatusCancelledByDriver, true},
 		{"WAITING->CANCELLED_BY_RIDER", TripStatusWaiting, TripStatusCancelledByRider, true},
+		{"ARRIVED->STARTED", TripStatusArrived, TripStatusStarted, true},
+		{"ARRIVED->CANCELLED_BY_DRIVER", TripStatusArrived, TripStatusCancelledByDriver, true},
+		{"ARRIVED->CANCELLED_BY_RIDER", TripStatusArrived, TripStatusCancelledByRider, true},
+		{"ARRIVED->ARRIVED disallowed", TripStatusArrived, TripStatusArrived, false},
+		{"ARRIVED->WAITING disallowed", TripStatusArrived, TripStatusWaiting, false},
 		{"STARTED->FINISHED", TripStatusStarted, TripStatusFinished, true},
 		{"STARTED->CANCELLED_BY_DRIVER", TripStatusStarted, TripStatusCancelledByDriver, true},
 		{"STARTED->CANCELLED_BY_RIDER", TripStatusStarted, TripStatusCancelledByRider, true},
@@ -44,7 +50,9 @@ func TestValidateTransition(t *testing.T) {
 		to   string
 		want error
 	}{
+		{"valid WAITING->ARRIVED", TripStatusWaiting, TripStatusArrived, nil},
 		{"valid WAITING->STARTED", TripStatusWaiting, TripStatusStarted, nil},
+		{"valid ARRIVED->STARTED", TripStatusArrived, TripStatusStarted, nil},
 		{"valid STARTED->FINISHED", TripStatusStarted, TripStatusFinished, nil},
 		{"invalid WAITING->FINISHED", TripStatusWaiting, TripStatusFinished, ErrInvalidTransition},
 		{"invalid FINISHED->STARTED", TripStatusFinished, TripStatusStarted, ErrInvalidTransition},
@@ -70,6 +78,7 @@ func TestIsTerminal(t *testing.T) {
 		{TripStatusCancelledByRider, true},
 		{TripStatusCancelled, true},
 		{TripStatusWaiting, false},
+		{TripStatusArrived, false},
 		{TripStatusStarted, false},
 		{"", false},
 	}

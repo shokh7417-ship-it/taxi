@@ -20,6 +20,16 @@ import (
 	"taxi-mvp/internal/ws"
 )
 
+// Same window as dispatch: only Telegram live location updates count as fresh.
+const tripPickupLiveFreshSeconds = 90
+
+func parseDriverLiveAtUTC(s string) (time.Time, error) {
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.UTC); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, s)
+}
+
 // TripService handles trip lifecycle: start, add points, finish, cancel; notifies rider and driver.
 type TripService struct {
 	db                   *sql.DB
@@ -28,9 +38,9 @@ type TripService struct {
 	driverBot            *tgbotapi.BotAPI
 	cfg                  *config.Config
 	hub                  HubBroadcaster
-	fareSvc              *FareService // optional; if set, fare comes from DB tiered settings
+	fareSvc              *FareService                   // optional; if set, fare comes from DB tiered settings
 	payments             repositories.PaymentRepository // optional; legacy payments row on commission; nil skips InsertPaymentTx
-	OnDriverStatusUpdate func(telegramID int64)          // optional; e.g. update driver's pinned status panel after trip finish
+	OnDriverStatusUpdate func(telegramID int64)         // optional; e.g. update driver's pinned status panel after trip finish
 }
 
 // HubBroadcaster is the minimal interface for broadcasting trip events (optional; can be nil).
@@ -50,6 +60,53 @@ func NewTripService(db *sql.DB, tripRepo *repositories.TripRepo, riderBot, drive
 		tripRepo = repositories.NewTripRepo(db)
 	}
 	return &TripService{db: db, tripRepo: tripRepo, riderBot: riderBot, driverBot: driverBot, cfg: cfg, hub: hub, fareSvc: fareSvc, payments: payments}
+}
+
+func (s *TripService) pickupCoordsForTrip(ctx context.Context, tripID string) (pickupLat, pickupLng float64, err error) {
+	err = s.db.QueryRowContext(ctx, `
+		SELECT r.pickup_lat, r.pickup_lng FROM trips t
+		JOIN ride_requests r ON r.id = t.request_id WHERE t.id = ?1`, tripID).Scan(&pickupLat, &pickupLng)
+	return pickupLat, pickupLng, err
+}
+
+// ensureDriverNearPickup checks drivers.last_lat/lng against pickup using fresh Telegram live location (same rules as dispatch).
+func (s *TripService) ensureDriverNearPickup(ctx context.Context, driverUserID int64, pickupLat, pickupLng float64) error {
+	maxM := int64(100)
+	if s.cfg != nil && s.cfg.PickupStartMaxMeters > 0 {
+		maxM = int64(s.cfg.PickupStartMaxMeters)
+	}
+	var lastLat, lastLng sql.NullFloat64
+	var lastLive sql.NullString
+	var liveActive int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT last_lat, last_lng, last_live_location_at, COALESCE(live_location_active, 0)
+		FROM drivers WHERE user_id = ?1`, driverUserID).Scan(&lastLat, &lastLng, &lastLive, &liveActive)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return domain.ErrDriverLocationStale
+		}
+		return err
+	}
+	if liveActive != 1 {
+		return domain.ErrLiveLocationInactive
+	}
+	if !lastLive.Valid || lastLive.String == "" {
+		return domain.ErrDriverLocationStale
+	}
+	t, perr := parseDriverLiveAtUTC(lastLive.String)
+	if perr != nil {
+		return domain.ErrDriverLocationStale
+	}
+	if time.Since(t) > time.Duration(tripPickupLiveFreshSeconds)*time.Second {
+		return domain.ErrDriverLocationStale
+	}
+	if !lastLat.Valid || !lastLng.Valid {
+		return domain.ErrDriverLocationStale
+	}
+	if utils.HaversineMeters(lastLat.Float64, lastLng.Float64, pickupLat, pickupLng) > float64(maxM) {
+		return domain.ErrTooFarFromPickup
+	}
+	return nil
 }
 
 // ScheduleStartReminder schedules a one-off check after StartReminderSeconds. If trip is still WAITING,
@@ -85,8 +142,8 @@ func (s *TripService) ScheduleStartReminder(ctx context.Context, tripID string, 
 	}()
 }
 
-// StartTrip sets trip to STARTED when status is WAITING. Idempotent: if already STARTED returns noop.
-// Uses state machine and conditional UPDATE for race safety.
+// StartTrip sets trip to STARTED from WAITING or ARRIVED. From WAITING, requires driver near pickup with fresh live location.
+// From ARRIVED, proximity is not re-checked (driver already confirmed at pickup). Idempotent if already STARTED.
 func (s *TripService) StartTrip(ctx context.Context, tripID string, driverUserID int64) (*TripActionResult, error) {
 	current, err := s.tripRepo.GetStatus(ctx, tripID)
 	if err != nil {
@@ -101,6 +158,15 @@ func (s *TripService) StartTrip(ctx context.Context, tripID string, driverUserID
 	}
 	if err := domain.ValidateTransition(current, domain.TripStatusStarted); err != nil {
 		return nil, err
+	}
+	if current == domain.TripStatusWaiting {
+		pickupLat, pickupLng, perr := s.pickupCoordsForTrip(ctx, tripID)
+		if perr != nil {
+			return nil, perr
+		}
+		if err := s.ensureDriverNearPickup(ctx, driverUserID, pickupLat, pickupLng); err != nil {
+			return nil, err
+		}
 	}
 	n, err := s.tripRepo.UpdateToStarted(ctx, tripID, driverUserID)
 	if err != nil {
@@ -156,6 +222,43 @@ func (s *TripService) StartTrip(ctx context.Context, tripID string, driverUserID
 	}
 	logger.TripEvent("trip_start", tripID, "updated", logger.TripEventAttrs(driverUserID, riderUserID)...)
 	return &TripActionResult{Result: "updated", Status: domain.TripStatusStarted}, nil
+}
+
+// MarkArrived sets status to ARRIVED from WAITING when the driver is near pickup (same checks as starting from WAITING).
+func (s *TripService) MarkArrived(ctx context.Context, tripID string, driverUserID int64) (*TripActionResult, error) {
+	current, err := s.tripRepo.GetStatus(ctx, tripID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, domain.ErrTripNotFound
+		}
+		return nil, err
+	}
+	if current == domain.TripStatusArrived {
+		return &TripActionResult{Result: "noop", Status: domain.TripStatusArrived}, nil
+	}
+	if err := domain.ValidateTransition(current, domain.TripStatusArrived); err != nil {
+		return nil, err
+	}
+	pickupLat, pickupLng, perr := s.pickupCoordsForTrip(ctx, tripID)
+	if perr != nil {
+		return nil, perr
+	}
+	if err := s.ensureDriverNearPickup(ctx, driverUserID, pickupLat, pickupLng); err != nil {
+		return nil, err
+	}
+	n, err := s.tripRepo.UpdateToArrived(ctx, tripID, driverUserID)
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		current, _ = s.tripRepo.GetStatus(ctx, tripID)
+		if current == domain.TripStatusArrived {
+			return &TripActionResult{Result: "noop", Status: domain.TripStatusArrived}, nil
+		}
+		return nil, domain.ErrInvalidTransition
+	}
+	logger.TripEvent("trip_arrived", tripID, "updated", logger.TripEventAttrs(driverUserID, 0)...)
+	return &TripActionResult{Result: "updated", Status: domain.TripStatusArrived}, nil
 }
 
 // MinSpeedKmh is the minimum speed (km/h) for a segment to count toward fare distance (avoids GPS noise).

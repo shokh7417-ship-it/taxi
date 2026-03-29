@@ -31,6 +31,10 @@ func writeTripError(c *gin.Context, tripID string, err error) {
 		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "invalid transition", "trip_id": tripID})
 	case errors.Is(err, domain.ErrAlreadyFinished), errors.Is(err, domain.ErrAlreadyCancelled):
 		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": err.Error(), "trip_id": tripID})
+	case errors.Is(err, domain.ErrTooFarFromPickup):
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "Mijozga hali yetib bormagansiz. Avval pickup nuqtasiga yeting.", "trip_id": tripID})
+	case errors.Is(err, domain.ErrDriverLocationStale), errors.Is(err, domain.ErrLiveLocationInactive):
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "Jonli lokatsiyangiz yangilanmagan yoki o‘chirilgan. Telegramda jonli lokatsiyani yoqing.", "trip_id": tripID})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "operation failed", "trip_id": tripID})
 	}
@@ -77,11 +81,11 @@ type LatLng struct {
 
 // TripSummary is the standardized trip object for resync (nested in GET /trip/:id; rider and driver Mini App).
 type TripSummary struct {
-	ID         string  `json:"id"`          // trip id (string; e.g. UUID)
-	Status     string  `json:"status"`      // WAITING | STARTED | FINISHED | CANCELLED_*
+	ID         string  `json:"id"`     // trip id (string; e.g. UUID)
+	Status     string  `json:"status"` // WAITING | ARRIVED | STARTED | FINISHED | CANCELLED_*
 	DistanceM  int64   `json:"distance_m,omitempty"`
 	DistanceKm float64 `json:"distance_km"`
-	Fare       int64   `json:"fare"`        // current estimate or final stored amount
+	Fare       int64   `json:"fare"`                  // current estimate or final stored amount
 	FareAmount *int64  `json:"fare_amount,omitempty"` // null until FINISHED
 }
 
@@ -91,9 +95,9 @@ type TripInfoResponse struct {
 	TripID     string       `json:"trip_id"`
 	DriverID   int64        `json:"driver_id,omitempty"`
 	Status     string       `json:"status"`
-	Pickup     LatLng       `json:"pickup"`   // { lat, lng } for rider/driver map
-	Drop       LatLng       `json:"drop"`     // { lat, lng }
-	Driver     LatLng       `json:"driver"`   // { lat, lng } from drivers.last_lat/lng
+	Pickup     LatLng       `json:"pickup"` // { lat, lng } for rider/driver map
+	Drop       LatLng       `json:"drop"`   // { lat, lng }
+	Driver     LatLng       `json:"driver"` // { lat, lng } from drivers.last_lat/lng
 	DistanceKm float64      `json:"distance_km"`
 	Fare       int64        `json:"fare"`
 	Trip       *TripSummary `json:"trip,omitempty"`
@@ -136,6 +140,43 @@ func TripStart(db *sql.DB, tripSvc *services.TripService) gin.HandlerFunc {
 			return
 		}
 		result, err := tripSvc.StartTrip(ctx, req.TripID, u.UserID)
+		if err != nil {
+			writeTripError(c, req.TripID, err)
+			return
+		}
+		writeTripResult(c, req.TripID, result)
+	}
+}
+
+// TripArrivedRequest body for POST /trip/arrived.
+type TripArrivedRequest struct {
+	TripID string `json:"trip_id" binding:"required"`
+}
+
+// TripArrived calls TripService.MarkArrived (driver at pickup). Requires driver auth.
+func TripArrived(db *sql.DB, tripSvc *services.TripService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		u := auth.UserFromContext(c.Request.Context())
+		if u == nil || u.Role != domain.RoleDriver {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "driver auth required"})
+			return
+		}
+		var req TripArrivedRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+			return
+		}
+		ctx := c.Request.Context()
+		ok, err := auth.AuthorizeTripAccess(ctx, db, u.UserID, req.TripID, u.Role)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "authorization failed"})
+			return
+		}
+		if !ok {
+			c.JSON(http.StatusForbidden, gin.H{"error": "not assigned to this trip"})
+			return
+		}
+		result, err := tripSvc.MarkArrived(ctx, req.TripID, u.UserID)
 		if err != nil {
 			writeTripError(c, req.TripID, err)
 			return

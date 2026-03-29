@@ -30,15 +30,15 @@ func IgnoreReasonAccuracy(accuracy float64) string {
 
 // DriverLocationRequest is the JSON body for POST /driver/location. driver_id comes from auth context.
 type DriverLocationRequest struct {
-	Lat      float64 `json:"lat" binding:"required"`
-	Lng      float64 `json:"lng" binding:"required"`
-	Accuracy float64 `json:"accuracy"` // meters; optional, ignored if > 50
-	Timestamp *int64 `json:"timestamp"` // Unix seconds when fix was taken; optional, else server time
+	Lat       float64 `json:"lat" binding:"required"`
+	Lng       float64 `json:"lng" binding:"required"`
+	Accuracy  float64 `json:"accuracy"`  // meters; optional, ignored if > 50
+	Timestamp *int64  `json:"timestamp"` // Unix seconds when fix was taken; optional, else server time
 }
 
 // DriverLocation updates driver's last position and optionally adds a point to active trip.
 // Returns {"ok": true} or {"ok": true, "ignored": "reason"} when update is ignored. Broadcasts driver_location_update with lat, lng, distance_km, fare when trip is STARTED.
-// When driver has no active (WAITING/STARTED) trip and is not manually offline, also marks driver available again
+// When driver has no active (WAITING/ARRIVED/STARTED) trip and is not manually offline, also marks driver available again
 // and runs pending-request dispatch (for example right after finishing a trip from the Mini App).
 func DriverLocation(db *sql.DB, tripSvc *services.TripService, matchSvc *services.MatchService, driverBot *tgbotapi.BotAPI, hub *ws.Hub, cfg *config.Config, fareSvc *services.FareService) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -58,7 +58,7 @@ func DriverLocation(db *sql.DB, tripSvc *services.TripService, matchSvc *service
 		legalSvc := legal.NewService(db)
 		var activeTrip string
 		_ = db.QueryRowContext(ctx, `
-			SELECT id FROM trips WHERE driver_user_id = ?1 AND status IN ('WAITING','STARTED') LIMIT 1`,
+			SELECT id FROM trips WHERE driver_user_id = ?1 AND status IN ('WAITING','ARRIVED','STARTED') LIMIT 1`,
 			driverID).Scan(&activeTrip)
 		if activeTrip == "" && !legalSvc.DriverHasActiveLegal(ctx, driverID) {
 			c.JSON(http.StatusForbidden, gin.H{"error": legal.ErrCodeRequired})
@@ -128,7 +128,7 @@ func DriverLocation(db *sql.DB, tripSvc *services.TripService, matchSvc *service
 						hub.BroadcastToTrip(tripID, ws.Event{
 							Type:       "driver_location_update",
 							TripStatus: domain.TripStatusStarted,
-							Payload:   payload,
+							Payload:    payload,
 						})
 					}
 				}

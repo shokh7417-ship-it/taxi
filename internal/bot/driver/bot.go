@@ -2,8 +2,8 @@ package driver
 
 import (
 	"context"
-	_ "embed"
 	"database/sql"
+	_ "embed"
 	"fmt"
 	"io"
 	"log"
@@ -28,8 +28,8 @@ import (
 var liveLocationStepsPNG []byte
 
 const (
-	btnLiveLocation = driverloc.BtnShareLiveLocation
-	btnPending      = "⏳ Tasdiqlash kutilmoqda"
+	btnLiveLocation     = driverloc.BtnShareLiveLocation
+	btnPending          = "⏳ Tasdiqlash kutilmoqda"
 	cbAccept            = "accept:"
 	cbDriverAcceptTerms = "driver_accept_terms"
 
@@ -49,10 +49,10 @@ const (
 	// One-time warning when Live Location becomes inactive.
 	liveLocationInactiveWarningMessage = "📍 Jonli lokatsiya o'chdi.\nBuyurtmalar kelmaydi.\n\nQayta yoqish: " + liveLocationBilingualInstruction
 	// Live is on but driver cannot receive orders (e.g. low balance); once per cooldown.
-	offlineButLiveReminderMessage = "📡 Jonli lokatsiya yoqilgan.\n\nBuyurtmalar olish uchun balansingiz yetarli bo‘lishi kerak. Balansni to‘ldiring."
-	liveLocationHintCooldownHours   = 8
-	insufficientBalanceMessage        = "Balansingiz yetarli emas. So'rovlar olish uchun balansni to'ldiring."
-	staticLocationRejectionMessage    = "❌ Oddiy lokatsiya qabul qilinmaydi.\n\nBuyurtmalar olish uchun jonli lokatsiya ulashing.\n\n" + liveLocationBilingualInstruction
+	offlineButLiveReminderMessage  = "📡 Jonli lokatsiya yoqilgan.\n\nBuyurtmalar olish uchun balansingiz yetarli bo‘lishi kerak. Balansni to‘ldiring."
+	liveLocationHintCooldownHours  = 8
+	insufficientBalanceMessage     = "Balansingiz yetarli emas. So'rovlar olish uchun balansni to'ldiring."
+	staticLocationRejectionMessage = "❌ Oddiy lokatsiya qabul qilinmaydi.\n\nBuyurtmalar olish uchun jonli lokatsiya ulashing.\n\n" + liveLocationBilingualInstruction
 
 	// Registration: car types (Uzbekistan taxi market). "Boshqa" allows manual input.
 	carTypeBoshqa = "Boshqa"
@@ -183,6 +183,7 @@ func postLegalReliveMessage(pendingRequestID string) string {
 	}
 	return s
 }
+
 var (
 	carTypes = []string{"Cobalt", "Nexia", "Nexia 2", "Nexia 3", "Matiz", "Gentra", "Lacetti", "Malibu", "BYD", "Lada", "Damas", carTypeBoshqa}
 	colors   = []string{"Oq", "Qora", "Sariq", "Qizil", "Kulrang", "Boshqa"}
@@ -981,7 +982,7 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 	sendAdminApprovalRequest(ctx, bot, db, cfg, userID, telegramID)
 
 	// Notify driver.
-		send(bot, chatID, "✅ Ma’lumotlaringiz qabul qilindi.\nAdmin tasdiqlashidan so‘ng sizga xabar beriladi.")
+	send(bot, chatID, "✅ Ma’lumotlaringiz qabul qilindi.\nAdmin tasdiqlashidan so‘ng sizga xabar beriladi.")
 	rewardReferrerOnApplicationComplete(bot, db, userID)
 	kb := getDriverKeyboard(db, userID)
 	m := tgbotapi.NewMessage(chatID, "Tasdiqlash kutilmoqda. Holatni /status buyrug'i orqali tekshiring.")
@@ -1492,10 +1493,11 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		log.Printf("driver: live_location trip_point user_id=%d trip_id=%s lat=%.6f lng=%.6f", userID, startedTripID, lat, lng)
 		return
 	}
-	// If WAITING trip, do nothing (no spam)
-	var waitingTripID string
-	if err := db.QueryRowContext(ctx, `SELECT id FROM trips WHERE driver_user_id = ?1 AND status = ?2 LIMIT 1`, userID, domain.TripStatusWaiting).Scan(&waitingTripID); err == nil && waitingTripID != "" {
-		log.Printf("driver: live_location skip_dispatch user_id=%d trip_status=WAITING trip_id=%s", userID, waitingTripID)
+	// If assigned but trip not started yet (WAITING or ARRIVED), do not treat as "no trip" for auto-online / dispatch.
+	var preStartTripID string
+	var preStartStatus string
+	if err := db.QueryRowContext(ctx, `SELECT id, status FROM trips WHERE driver_user_id = ?1 AND status IN (?2, ?3) LIMIT 1`, userID, domain.TripStatusWaiting, domain.TripStatusArrived).Scan(&preStartTripID, &preStartStatus); err == nil && preStartTripID != "" {
+		log.Printf("driver: live_location skip_dispatch user_id=%d trip_status=%s trip_id=%s", userID, preStartStatus, preStartTripID)
 		return
 	}
 
@@ -1788,7 +1790,7 @@ type webAppKeyboard struct {
 	InlineKeyboard [][]webAppButton `json:"inline_keyboard"`
 }
 type webAppButton struct {
-	Text   string     `json:"text"`
+	Text   string      `json:"text"`
 	WebApp *webAppInfo `json:"web_app,omitempty"`
 }
 type webAppInfo struct {

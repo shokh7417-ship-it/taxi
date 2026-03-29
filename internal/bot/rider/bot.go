@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/google/uuid"
 	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/domain"
 	"taxi-mvp/internal/legal"
@@ -20,16 +20,16 @@ import (
 )
 
 const (
-	btnLocation    = "📍 Lokatsiya yuborish"
-	btnCancel      = "❌ Bekor qilish"
-	btnTaxiCall    = "🚕 Taxi chaqirish"
-	btnTaxiNew     = "🚕 Yangi taxi chaqirish"
-	btnHelp        = "ℹ️ Yordam"
-	btnTrackDriver = "📍 Haydovchini kuzatish"
+	btnLocation        = "📍 Lokatsiya yuborish"
+	btnCancel          = "❌ Bekor qilish"
+	btnTaxiCall        = "🚕 Taxi chaqirish"
+	btnTaxiNew         = "🚕 Yangi taxi chaqirish"
+	btnHelp            = "ℹ️ Yordam"
+	btnTrackDriver     = "📍 Haydovchini kuzatish"
 	cbRiderAcceptTerms = "rider_accept_terms"
 
-	resumeRiderLocation     = "rider_location"
-	resumeRiderTaxi         = "rider_taxi"
+	resumeRiderLocation    = "rider_location"
+	resumeRiderTaxi        = "rider_taxi"
 	resumeRiderSearchAgain = "rider_search_again"
 	resumeRiderTrack       = "rider_track"
 )
@@ -463,9 +463,9 @@ func handleTrackDriver(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, cha
 	var tripID string
 	err = db.QueryRowContext(context.Background(), `
 		SELECT id FROM trips
-		WHERE rider_user_id = ?1 AND status IN (?2, ?3)
+		WHERE rider_user_id = ?1 AND status IN (?2, ?3, ?4)
 		ORDER BY id DESC LIMIT 1`,
-		userID, domain.TripStatusWaiting, domain.TripStatusStarted).Scan(&tripID)
+		userID, domain.TripStatusWaiting, domain.TripStatusArrived, domain.TripStatusStarted).Scan(&tripID)
 	if err != nil || tripID == "" {
 		send(bot, chatID, "Aktiv safar topilmadi.")
 		return
@@ -496,7 +496,7 @@ type riderMapInlineKbd struct {
 	InlineKeyboard [][]riderMapWebAppBtn `json:"inline_keyboard"`
 }
 type riderMapWebAppBtn struct {
-	Text   string             `json:"text"`
+	Text   string              `json:"text"`
 	WebApp *riderMapWebAppInfo `json:"web_app,omitempty"`
 }
 type riderMapWebAppInfo struct {
@@ -630,9 +630,9 @@ func handleCancel(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, tripServ
 		var tripID string
 		err := db.QueryRowContext(ctx, `
 			SELECT id FROM trips
-			WHERE rider_user_id = ?1 AND status IN (?2, ?3)
+			WHERE rider_user_id = ?1 AND status IN (?2, ?3, ?4)
 			ORDER BY id DESC LIMIT 1`,
-			userID, domain.TripStatusWaiting, domain.TripStatusStarted).Scan(&tripID)
+			userID, domain.TripStatusWaiting, domain.TripStatusArrived, domain.TripStatusStarted).Scan(&tripID)
 		if err == nil && tripID != "" {
 			result, err := tripService.CancelByRider(ctx, tripID, userID)
 			if err != nil {
@@ -683,7 +683,7 @@ func pollAndNotifyRider(ctx context.Context, bot *tgbotapi.BotAPI, db *sql.DB, c
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-	notifyTripUpdates(bot, db, notified)
+			notifyTripUpdates(bot, db, notified)
 		}
 	}
 }

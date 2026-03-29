@@ -146,7 +146,7 @@ func (s *MatchService) runPriorityDispatch(ctx context.Context, requestID string
 		  AND d.color IS NOT NULL AND d.color != ''
 		  AND d.plate IS NOT NULL AND d.plate != ''
 		  AND (d.grid_id IN (`+placeholders+`) OR d.grid_id IS NULL)
-		  AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.driver_user_id = d.user_id AND t.status IN ('WAITING','STARTED'))`,
+		  AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.driver_user_id = d.user_id AND t.status IN ('WAITING','ARRIVED','STARTED'))`,
 		args...)
 	if err != nil {
 		rows, _ = s.db.QueryContext(ctx, `
@@ -159,7 +159,7 @@ func (s *MatchService) runPriorityDispatch(ctx context.Context, requestID string
 			  AND d.last_seen_at IS NOT NULL AND d.last_seen_at >= ?1
 			  AND d.last_lat IS NOT NULL AND d.last_lng IS NOT NULL
 			  AND (d.grid_id IN (`+placeholders+`) OR d.grid_id IS NULL)
-			  AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.driver_user_id = d.user_id AND t.status IN ('WAITING','STARTED'))`,
+			  AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.driver_user_id = d.user_id AND t.status IN ('WAITING','ARRIVED','STARTED'))`,
 			args...)
 	}
 	if err != nil {
@@ -350,10 +350,10 @@ func (s *MatchService) NotifyDriverOfPendingRequests(ctx context.Context, driver
 	} else {
 		return
 	}
-	// Skip if driver already has an active (WAITING/STARTED) trip.
+	// Skip if driver already has an active (WAITING/ARRIVED/STARTED) trip.
 	var activeTripID string
 	_ = s.db.QueryRowContext(ctx, `
-		SELECT id FROM trips WHERE driver_user_id = ?1 AND status IN ('WAITING','STARTED') LIMIT 1`,
+		SELECT id FROM trips WHERE driver_user_id = ?1 AND status IN ('WAITING','ARRIVED','STARTED') LIMIT 1`,
 		driverUserID).Scan(&activeTripID)
 	if activeTripID != "" {
 		if s.cfg != nil && s.cfg.DispatchDebug {

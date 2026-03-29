@@ -17,6 +17,7 @@ const (
 // Trip status (trips.status).
 const (
 	TripStatusWaiting         = "WAITING"
+	TripStatusArrived         = "ARRIVED"
 	TripStatusStarted         = "STARTED"
 	TripStatusFinished        = "FINISHED"
 	TripStatusCancelled       = "CANCELLED"

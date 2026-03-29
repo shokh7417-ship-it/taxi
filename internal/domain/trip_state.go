@@ -9,20 +9,30 @@ var (
 	ErrAlreadyFinished   = errors.New("trip already finished")
 	ErrAlreadyCancelled  = errors.New("trip already cancelled")
 	ErrNoOp              = errors.New("noop") // not used as error; noop is returned as success with result "noop"
+	// Pickup proximity / live location (trip start / mark arrived).
+	ErrTooFarFromPickup     = errors.New("too far from pickup")
+	ErrDriverLocationStale  = errors.New("driver live location stale or missing")
+	ErrLiveLocationInactive = errors.New("telegram live location not active")
 )
 
 // allowedTransitions defines valid (from -> to) trip status changes.
 // Terminal states (FINISHED, CANCELLED_*) have no outgoing transitions.
 var allowedTransitions = map[string]map[string]bool{
 	TripStatusWaiting: {
-		TripStatusStarted:            true,
-		TripStatusCancelledByDriver:  true,
-		TripStatusCancelledByRider:   true,
+		TripStatusArrived:           true,
+		TripStatusStarted:           true,
+		TripStatusCancelledByDriver: true,
+		TripStatusCancelledByRider:  true,
+	},
+	TripStatusArrived: {
+		TripStatusStarted:           true,
+		TripStatusCancelledByDriver: true,
+		TripStatusCancelledByRider:  true,
 	},
 	TripStatusStarted: {
-		TripStatusFinished:           true,
-		TripStatusCancelledByDriver:  true,
-		TripStatusCancelledByRider:   true,
+		TripStatusFinished:          true,
+		TripStatusCancelledByDriver: true,
+		TripStatusCancelledByRider:  true,
 	},
 	// FINISHED and CANCELLED_* have no outgoing transitions
 }
