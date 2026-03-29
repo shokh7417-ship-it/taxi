@@ -85,24 +85,35 @@ func GetDriverPromoProgress(ctx context.Context, db *sql.DB, driverUserID int64)
 	return GetDriverPromoProgramStatus(ctx, db, driverUserID)
 }
 
-// FinishedTripCountAfterCompletingTrip returns the driver's total number of FINISHED trips right after
-// trip `justFinishedTripID` was committed as FINISHED. Uses (count of other FINISHED trips) + 1 so the
-// value is correct even when a plain COUNT(*) would lag the UPDATE (e.g. libSQL read routing).
-// Only rows with status exactly FINISHED count; cancelled / waiting / started do not.
-func FinishedTripCountAfterCompletingTrip(ctx context.Context, db *sql.DB, driverUserID int64, justFinishedTripID string) (int64, error) {
-	tid := strings.TrimSpace(justFinishedTripID)
+// FinishedTripCountAfterCompletingTrip returns how many trips the driver has with status FINISHED,
+// after the given trip row is already FINISHED. The current tripID must belong to the driver and be FINISHED
+// so the count includes it (call only after FinishTrip’s UPDATE commits, or inside the same transaction after UPDATE).
+func FinishedTripCountAfterCompletingTrip(ctx context.Context, db *sql.DB, driverUserID int64, tripID string) (int64, error) {
+	tid := strings.TrimSpace(tripID)
 	if tid == "" {
 		return 0, fmt.Errorf("finished trip id required")
 	}
-	var others int64
+	var st string
 	err := db.QueryRowContext(ctx, `
+		SELECT status FROM trips WHERE id = ?1 AND driver_user_id = ?2`, tid, driverUserID).Scan(&st)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("trip %q not found for driver %d", tid, driverUserID)
+		}
+		return 0, err
+	}
+	if st != domain.TripStatusFinished {
+		return 0, fmt.Errorf("trip %q not FINISHED (status=%s)", tid, st)
+	}
+	var n int64
+	err = db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM trips
-		WHERE driver_user_id = ?1 AND status = ?2 AND id != ?3`,
-		driverUserID, domain.TripStatusFinished, tid).Scan(&others)
+		WHERE driver_user_id = ?1 AND status = ?2`,
+		driverUserID, domain.TripStatusFinished).Scan(&n)
 	if err != nil {
 		return 0, err
 	}
-	return others + 1, nil
+	return n, nil
 }
 
 // TryGrantSignupPromoOnce grants 20_000 promo once on approval (signup_bonus_paid gate). Ledger + metadata source signup_promo.
@@ -148,23 +159,27 @@ func TryGrantSignupPromoOnce(ctx context.Context, db *sql.DB, driverUserID int64
 const promoProgramKey = "program"
 const promoProgramID = "yettiqanot_driver_v2026"
 
-// TryGrantFirstThreeTripPromo grants +10_000 promo for trip ordinal 1–3 only (based on FINISHED count for this driver),
-// once per trip_id. Always recomputes FINISHED count from tripID via FinishedTripCountAfterCompletingTrip (trip-finish path).
+// TryGrantFirstThreeTripPromo grants +10_000 promo for finished-trip ordinals 1–3 only, once per trip_id
+// (unique driver_ledger driver_id + reference_id for first_3_trip_bonus). Count is always from
+// FinishedTripCountAfterCompletingTrip(ctx, db, driverUserID, tripID) — no external/cached count.
 func TryGrantFirstThreeTripPromo(ctx context.Context, db *sql.DB, driverUserID int64, tripID string) (granted bool, tripNum int, err error) {
 	tripID = strings.TrimSpace(tripID)
 	if tripID == "" {
-		log.Printf("promo: PROMO_SKIP driver=%d reason=empty_trip_id", driverUserID)
+		log.Printf("PROMO_SKIP driver=%d trip= reason=empty_trip_id", driverUserID)
 		return false, 0, nil
 	}
 	finishedTripCount, err := FinishedTripCountAfterCompletingTrip(ctx, db, driverUserID, tripID)
 	if err != nil {
-		log.Printf("promo: PROMO_CHECK driver=%d trip=%s err=%v", driverUserID, tripID, err)
+		log.Printf("PROMO_CHECK driver=%d trip=%s err=%v", driverUserID, tripID, err)
 		return false, 0, err
 	}
-	eligible := finishedTripCount >= 1 && finishedTripCount <= 3
-	log.Printf("promo: PROMO_CHECK driver=%d trip=%s finishedCount=%d eligible_first3=%v", driverUserID, tripID, finishedTripCount, eligible)
-	if finishedTripCount < 1 || finishedTripCount > 3 {
-		log.Printf("promo: PROMO_SKIP driver=%d trip=%s reason=outside_first3_window count=%d", driverUserID, tripID, finishedTripCount)
+	log.Printf("PROMO_CHECK driver=%d trip=%s finished_trip_count=%d", driverUserID, tripID, finishedTripCount)
+	if finishedTripCount > 3 {
+		log.Printf("PROMO_SKIP driver=%d trip=%s reason=after_first_three count=%d", driverUserID, tripID, finishedTripCount)
+		return false, 0, nil
+	}
+	if finishedTripCount < 1 {
+		log.Printf("PROMO_SKIP driver=%d trip=%s reason=invalid_count count=%d", driverUserID, tripID, finishedTripCount)
 		return false, 0, nil
 	}
 	tripNum = int(finishedTripCount)
@@ -183,7 +198,7 @@ func TryGrantFirstThreeTripPromo(ctx context.Context, db *sql.DB, driverUserID i
 		return false, tripNum, err
 	}
 	if exists > 0 {
-		log.Printf("promo: PROMO_SKIP driver=%d trip=%s reason=already_granted_first3_ledger", driverUserID, tripID)
+		log.Printf("PROMO_SKIP driver=%d trip=%s reason=already_granted_ledger", driverUserID, tripID)
 		return false, tripNum, nil
 	}
 
@@ -221,7 +236,7 @@ func TryGrantFirstThreeTripPromo(ctx context.Context, db *sql.DB, driverUserID i
 	if err := tx.Commit(); err != nil {
 		return false, tripNum, err
 	}
-	log.Printf("promo: PROMO_GRANTED driver=%d trip=%s trip_num=%d amount=%d", driverUserID, tripID, tripNum, FirstThreeTripPromoSoM)
+	log.Printf("PROMO_GRANTED driver=%d trip=%s trip_num=%d amount=%d", driverUserID, tripID, tripNum, FirstThreeTripPromoSoM)
 	return true, tripNum, nil
 }
 

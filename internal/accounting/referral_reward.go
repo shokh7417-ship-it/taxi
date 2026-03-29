@@ -20,14 +20,16 @@ const (
 	RefTypeReferralReward  = "referral_reward"
 	ReferralRewardTripN    = 3
 
-	ReferralRewardReasonSuccess          = "success"
-	ReferralRewardReasonAlreadyGranted   = "already_granted"
-	ReferralRewardReasonNoInviter        = "no_inviter"
-	ReferralRewardReasonNotEnoughTrips   = "not_enough_trips"
+	ReferralRewardReasonSuccess             = "success"
+	ReferralRewardReasonAlreadyGranted      = "already_granted"
+	ReferralRewardReasonNoInviter           = "no_inviter"
+	ReferralRewardReasonNotEnoughTrips      = "not_enough_trips"
+	ReferralRewardReasonPastThirdTrip       = "past_third_trip"
+	ReferralRewardReasonEmptyTripID         = "empty_trip_id"
 	ReferralRewardReasonReferredNotApproved = "referred_not_approved"
-	ReferralRewardReasonInviterNotDriver = "inviter_not_driver"
-	ReferralRewardReasonSelfReferral     = "self_referral"
-	ReferralRewardReasonDBError          = "db_error"
+	ReferralRewardReasonInviterNotDriver    = "inviter_not_driver"
+	ReferralRewardReasonSelfReferral        = "self_referral"
+	ReferralRewardReasonDBError             = "db_error"
 )
 
 // ReferralRewardResult is returned by TryGrantReferralReward (Telegram only if Granted && InviterTelegramID set).
@@ -112,27 +114,33 @@ func RecordDriverReferral(ctx context.Context, db *sql.DB, referredUserID int64,
 	return err
 }
 
-// TryGrantReferralReward grants +ReferralRewardPromoSoM promo to inviter when referred has >=3 FINISHED trips and is approved.
-// justFinishedTripID should be the trip just set to FINISHED (count via FinishedTripCountAfterCompletingTrip). Empty id falls back to CountFinishedTripsForDriver (avoid for trip-finish path).
-// Uses users.referral_stage2_reward_paid on the referred user as the idempotency gate (repurposed: inviter payout completed).
-func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int64, justFinishedTripID string) (ReferralRewardResult, error) {
+// TryGrantReferralReward grants +ReferralRewardPromoSoM to the inviter only when the referred driver has
+// exactly 3 FINISHED trips (including the trip given by tripID), verification_status approved, and an inviter.
+// Count is always FinishedTripCountAfterCompletingTrip — no CountFinishedTripsForDriver fallback on the grant path.
+// Idempotency: users.referral_stage2_reward_paid on the referred user + unique driver_ledger (inviter, reference_id=referred id).
+func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int64, tripID string) (ReferralRewardResult, error) {
 	var out ReferralRewardResult
-	tripID := strings.TrimSpace(justFinishedTripID)
-	var finishedTripCount int64
-	var err error
-	if tripID != "" {
-		finishedTripCount, err = FinishedTripCountAfterCompletingTrip(ctx, db, referredUserID, tripID)
-	} else {
-		finishedTripCount, err = CountFinishedTripsForDriver(ctx, db, referredUserID)
+	tripID = strings.TrimSpace(tripID)
+	if tripID == "" {
+		out.Reason = ReferralRewardReasonEmptyTripID
+		log.Printf("REFERRAL_SKIP referred=%d reason=empty_trip_id", referredUserID)
+		return out, nil
 	}
+	finishedTripCount, err := FinishedTripCountAfterCompletingTrip(ctx, db, referredUserID, tripID)
 	if err != nil {
-		log.Printf("referral: REFERRAL_CHECK referred=%d trip=%q err=%v", referredUserID, tripID, err)
+		log.Printf("REFERRAL_CHECK referred=%d trip=%s err=%v", referredUserID, tripID, err)
 		out.Reason = ReferralRewardReasonDBError
 		return out, err
 	}
+	log.Printf("REFERRAL_CHECK referred=%d trip=%s finished_trip_count=%d need_exactly=%d", referredUserID, tripID, finishedTripCount, ReferralRewardTripN)
 	if finishedTripCount < ReferralRewardTripN {
 		out.Reason = ReferralRewardReasonNotEnoughTrips
-		log.Printf("referral: REFERRAL_SKIP referred=%d finishedCount=%d reason=not_enough_trips need=%d", referredUserID, finishedTripCount, ReferralRewardTripN)
+		log.Printf("REFERRAL_SKIP referred=%d trip=%s reason=not_enough_trips count=%d", referredUserID, tripID, finishedTripCount)
+		return out, nil
+	}
+	if finishedTripCount > ReferralRewardTripN {
+		out.Reason = ReferralRewardReasonPastThirdTrip
+		log.Printf("REFERRAL_SKIP referred=%d trip=%s reason=past_third_trip count=%d", referredUserID, tripID, finishedTripCount)
 		return out, nil
 	}
 	inviterID, hasInviter, err := GetInviterForDriver(ctx, db, referredUserID)
@@ -142,15 +150,14 @@ func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int6
 	}
 	if !hasInviter || inviterID <= 0 {
 		out.Reason = ReferralRewardReasonNoInviter
-		log.Printf("referral: REFERRAL_SKIP referred=%d finishedCount=%d reason=no_inviter", referredUserID, finishedTripCount)
+		log.Printf("REFERRAL_SKIP referred=%d trip=%s count=%d reason=no_inviter", referredUserID, tripID, finishedTripCount)
 		return out, nil
 	}
 	if inviterID == referredUserID {
 		out.Reason = ReferralRewardReasonSelfReferral
-		log.Printf("referral: REFERRAL_SKIP referred=%d reason=self_referral", referredUserID)
+		log.Printf("REFERRAL_SKIP referred=%d trip=%s reason=self_referral", referredUserID, tripID)
 		return out, nil
 	}
-	log.Printf("referral: REFERRAL_CHECK referred=%d inviter=%d trip=%q finishedCount=%d eligible=%v", referredUserID, inviterID, tripID, finishedTripCount, finishedTripCount >= ReferralRewardTripN)
 	var ver string
 	if err := db.QueryRowContext(ctx, `
 		SELECT COALESCE(verification_status, '') FROM drivers WHERE user_id = ?1`, referredUserID).Scan(&ver); err != nil {
@@ -163,7 +170,7 @@ func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int6
 	}
 	if strings.TrimSpace(ver) != "approved" {
 		out.Reason = ReferralRewardReasonReferredNotApproved
-		log.Printf("referral: REFERRAL_SKIP referred=%d inviter=%d reason=referred_not_approved", referredUserID, inviterID)
+		log.Printf("REFERRAL_SKIP referred=%d inviter=%d trip=%s reason=referred_not_approved", referredUserID, inviterID, tripID)
 		return out, nil
 	}
 	var invDriver int
@@ -173,7 +180,7 @@ func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int6
 	}
 	if invDriver == 0 {
 		out.Reason = ReferralRewardReasonInviterNotDriver
-		log.Printf("referral: REFERRAL_SKIP referred=%d inviter=%d reason=inviter_not_driver", referredUserID, inviterID)
+		log.Printf("REFERRAL_SKIP referred=%d inviter=%d trip=%s reason=inviter_not_driver", referredUserID, inviterID, tripID)
 		return out, nil
 	}
 	already, err := HasReferralRewardBeenGranted(ctx, db, inviterID, referredUserID)
@@ -183,14 +190,14 @@ func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int6
 	}
 	if already {
 		out.Reason = ReferralRewardReasonAlreadyGranted
-		log.Printf("referral: REFERRAL_SKIP referred=%d inviter=%d reason=already_granted_ledger", referredUserID, inviterID)
+		log.Printf("REFERRAL_SKIP referred=%d inviter=%d trip=%s reason=already_granted_ledger", referredUserID, inviterID, tripID)
 		return out, nil
 	}
 	var stage2 int
 	_ = db.QueryRowContext(ctx, `SELECT COALESCE(referral_stage2_reward_paid, 0) FROM users WHERE id = ?1`, referredUserID).Scan(&stage2)
 	if stage2 != 0 {
 		out.Reason = ReferralRewardReasonAlreadyGranted
-		log.Printf("referral: REFERRAL_SKIP referred=%d inviter=%d reason=already_granted_flag", referredUserID, inviterID)
+		log.Printf("REFERRAL_SKIP referred=%d inviter=%d trip=%s reason=already_granted_flag", referredUserID, inviterID, tripID)
 		return out, nil
 	}
 
@@ -210,7 +217,7 @@ func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int6
 	}
 	if n, _ := claim.RowsAffected(); n == 0 {
 		out.Reason = ReferralRewardReasonAlreadyGranted
-		log.Printf("referral: REFERRAL_SKIP referred=%d inviter=%d reason=already_granted_tx_gate", referredUserID, inviterID)
+		log.Printf("REFERRAL_SKIP referred=%d inviter=%d trip=%s reason=already_granted_tx_gate", referredUserID, inviterID, tripID)
 		return out, nil
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -220,8 +227,8 @@ func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int6
 		return out, err
 	}
 	meta, _ := json.Marshal(map[string]interface{}{
-		metaSourceKey:                "referral_reward",
-		"program":                    "yettiqanot_driver_v2026",
+		metaSourceKey:                 "referral_reward",
+		"program":                     "yettiqanot_driver_v2026",
 		"trigger_finished_trip_count": ReferralRewardTripN,
 	})
 	metaStr := string(meta)
@@ -263,7 +270,7 @@ func TryGrantReferralReward(ctx context.Context, db *sql.DB, referredUserID int6
 	out.UpdatedPromoBalance = promo
 	out.InviterUserID = inviterID
 	out.InviterTelegramID = tg
-	log.Printf("referral: REFERRAL_GRANTED inviter=%d referred=%d amount=%d promo_balance=%d", inviterID, referredUserID, ReferralRewardPromoSoM, promo)
+	log.Printf("REFERRAL_GRANTED inviter=%d referred=%d trip=%s amount=%d promo_balance=%d", inviterID, referredUserID, tripID, ReferralRewardPromoSoM, promo)
 	return out, nil
 }
 
@@ -274,10 +281,10 @@ func ReferralRewardInviterTelegramMessage(promoBalance int64) string {
 
 // DriverReferralStatus is optional API payload for the referred driver’s progress.
 type DriverReferralStatus struct {
-	InviterUserID          int64 `json:"inviter_user_id"`
-	FinishedTripCount      int64 `json:"finished_trip_count"`
-	RewardThreshold        int   `json:"reward_threshold"`
-	ReferralRewardGranted  bool  `json:"referral_reward_granted"`
+	InviterUserID         int64 `json:"inviter_user_id"`
+	FinishedTripCount     int64 `json:"finished_trip_count"`
+	RewardThreshold       int   `json:"reward_threshold"`
+	ReferralRewardGranted bool  `json:"referral_reward_granted"`
 }
 
 // GetReferredDriverReferralStatus returns referral progress for userID when they are a referred driver.

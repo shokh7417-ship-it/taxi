@@ -213,8 +213,37 @@ func TestTryGrantReferralReward_NotUntilThirdTrip(t *testing.T) {
 	}
 	addFinished("d")
 	r, err = TryGrantReferralReward(ctx, db, 11, "d")
-	if err != nil || r.Granted {
-		t.Fatalf("after 4 should not grant again: %+v", r)
+	if err != nil || r.Granted || r.Reason != ReferralRewardReasonPastThirdTrip {
+		t.Fatalf("after 4 want past_third_trip skip: %+v err=%v", r, err)
+	}
+}
+
+func TestTryGrantReferralReward_EmptyTripIDSkips(t *testing.T) {
+	db := setupAccountingTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	_, _ = db.Exec(`INSERT INTO users (id) VALUES (11)`)
+	_, _ = db.Exec(`INSERT INTO drivers (user_id) VALUES (11)`)
+	r, err := TryGrantReferralReward(ctx, db, 11, "")
+	if err != nil || r.Granted || r.Reason != ReferralRewardReasonEmptyTripID {
+		t.Fatalf("empty trip id: %+v err=%v", r, err)
+	}
+}
+
+func TestFinishedTripCountAfterCompletingTrip_IncludesTripAndRequiresFinished(t *testing.T) {
+	db := setupAccountingTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	_, _ = db.Exec(`INSERT INTO trips (id, driver_user_id, rider_user_id, status) VALUES ('a', 1, 2, ?1)`, domain.TripStatusFinished)
+	_, _ = db.Exec(`INSERT INTO trips (id, driver_user_id, rider_user_id, status) VALUES ('b', 1, 2, ?1)`, domain.TripStatusFinished)
+	n, err := FinishedTripCountAfterCompletingTrip(ctx, db, 1, "b")
+	if err != nil || n != 2 {
+		t.Fatalf("count want 2 got %d err=%v", n, err)
+	}
+	_, _ = db.Exec(`INSERT INTO trips (id, driver_user_id, rider_user_id, status) VALUES ('c', 1, 2, ?1)`, domain.TripStatusStarted)
+	_, err = FinishedTripCountAfterCompletingTrip(ctx, db, 1, "c")
+	if err == nil {
+		t.Fatal("want error when trip not FINISHED")
 	}
 }
 

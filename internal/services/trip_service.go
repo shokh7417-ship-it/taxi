@@ -414,12 +414,7 @@ func (s *TripService) FinishTrip(ctx context.Context, tripID string, driverUserI
 	firstThreeTripNum := 0
 	refRewardRes := accounting.ReferralRewardResult{}
 
-	// 1) Trip already FINISHED via UpdateToFinished. 2–4) Bonuses use deterministic count inside accounting (FinishedTripCountAfterCompletingTrip).
-	if fc, err := accounting.FinishedTripCountAfterCompletingTrip(ctx, s.db, driverUserID, tripID); err != nil {
-		log.Printf("trip_finish: trip=%s driver=%d finishedCount_error=%v", tripID, driverUserID, err)
-	} else {
-		log.Printf("trip_finish: trip=%s driver=%d finishedCount=%d", tripID, driverUserID, fc)
-	}
+	// UpdateToFinished commits (autocommit). Promo/referral read FINISHED rows via FinishedTripCountAfterCompletingTrip(tripID).
 	// Order: first-3-trip promo → referral → commission.
 	if g, tn, err := accounting.TryGrantFirstThreeTripPromo(ctx, s.db, driverUserID, tripID); err != nil {
 		log.Printf("trip_service: first_3_trip promo (driver=%d trip=%s): %v", driverUserID, tripID, err)
