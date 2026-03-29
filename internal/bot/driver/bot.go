@@ -726,9 +726,10 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, chatID, t
 	// Application is "complete" once both doc photos exist. /start does not re-run the form, so resend oferta whenever
 	// the driver still owes active legal acceptances (any verification_status, incl. NULL or rejected+re-upload edge cases).
 	if !driverHasAcceptedAgreement(ctx, db, userID) {
-		send(bot, chatID, "📄 Haydovchi shartnomasi (oferta). Quyidagi xabar(lar)ni o‘qing va oxiridagi «Qabul qilaman» tugmasini bosing.")
-		sendDriverAgreement(bot, db, chatID)
-		send(bot, chatID, "⚠️ Admin tasdiqigacha buyurtma olish uchun shartnomani qabul qilishingiz kerak.")
+		sendDriverAgreementForDriver(bot, db, chatID, userID, false)
+		if !driverHasAcceptedAgreement(ctx, db, userID) {
+			send(bot, chatID, "⚠️ Admin tasdiqigacha buyurtma olish uchun shartnomani qabul qilishingiz kerak.")
+		}
 	}
 	// Rewards and signup bonus are paid when docs are submitted (handleApplicationPhoto).
 	var statusMsgID sql.NullInt64
@@ -959,8 +960,7 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 
 	// Require driver agreement (oferta) before sending admin approval request.
 	if !driverHasAcceptedAgreement(ctx, db, userID) {
-		send(bot, chatID, "📄 Haydovchi shartnomasi (oferta). Quyidagi xabar(lar)ni o‘qing va oxiridagi «Qabul qilaman» tugmasini bosing.")
-		sendDriverAgreement(bot, db, chatID)
+		sendDriverAgreementForDriver(bot, db, chatID, userID, true)
 		send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
 		return true
 	}
@@ -1378,7 +1378,7 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		}
 		if !driverLegalAllowsLiveSharing(ctx, db, userID) {
 			send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
-			sendDriverAgreement(bot, db, chatID)
+			sendDriverAgreementForDriver(bot, db, chatID, userID, true)
 			return
 		}
 		_, _ = db.ExecContext(ctx, `
@@ -1405,7 +1405,7 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 	}
 	if !driverLegalAllowsLiveSharing(ctx, db, userID) {
 		_ = legal.NewService(db).SetPendingResume(ctx, userID, resumeDriverRelive, "")
-		sendDriverAgreement(bot, db, chatID)
+		sendDriverAgreementForDriver(bot, db, chatID, userID, true)
 		send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
 		return
 	}
@@ -1566,6 +1566,9 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 			send(bot, chatID, "Xatolik. Keyinroq urinib ko'ring.")
 			return
 		}
+		if err := legal.SyncDriverLegalPromptFingerprint(ctx, db, userID); err != nil {
+			log.Printf("driver: SyncDriverLegalPromptFingerprint user_id=%d: %v", userID, err)
+		}
 		_, _ = bot.Request(tgbotapi.NewCallback(q.ID, ""))
 		kind, payload, ok := lSvc.TakePendingResume(ctx, userID)
 		processedRelive := false
@@ -1709,7 +1712,7 @@ func handleAccept(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, assignme
 		} else {
 			_ = lSvc.SetPendingResume(ctx, userID, resumeDriverAccept, requestID)
 		}
-		sendDriverAgreement(bot, db, chatID)
+		sendDriverAgreementForDriver(bot, db, chatID, userID, true)
 		send(bot, chatID, "⚠️ Buyurtma qabul qilish uchun avval barcha hujjatlarni qabul qiling.")
 		return
 	}
