@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"taxi-mvp/internal/accounting"
 	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/domain"
 	"taxi-mvp/internal/driverloc"
@@ -27,7 +28,8 @@ type TripService struct {
 	cfg                  *config.Config
 	hub                  HubBroadcaster
 	fareSvc              *FareService // optional; if set, fare comes from DB tiered settings
-	OnDriverStatusUpdate func(telegramID int64) // optional; e.g. update driver's pinned status panel after trip finish
+	payments             repositories.PaymentRepository // optional; legacy payments row on commission; nil skips InsertPaymentTx
+	OnDriverStatusUpdate func(telegramID int64)          // optional; e.g. update driver's pinned status panel after trip finish
 }
 
 // HubBroadcaster is the minimal interface for broadcasting trip events (optional; can be nil).
@@ -41,12 +43,12 @@ type TripActionResult struct {
 	Status string // trip status after the action
 }
 
-// NewTripService returns a TripService. hub and fareSvc can be nil.
-func NewTripService(db *sql.DB, tripRepo *repositories.TripRepo, riderBot, driverBot *tgbotapi.BotAPI, cfg *config.Config, hub HubBroadcaster, fareSvc *FareService) *TripService {
+// NewTripService returns a TripService. hub, fareSvc, and payments can be nil.
+func NewTripService(db *sql.DB, tripRepo *repositories.TripRepo, riderBot, driverBot *tgbotapi.BotAPI, cfg *config.Config, hub HubBroadcaster, fareSvc *FareService, payments repositories.PaymentRepository) *TripService {
 	if tripRepo == nil {
 		tripRepo = repositories.NewTripRepo(db)
 	}
-	return &TripService{db: db, tripRepo: tripRepo, riderBot: riderBot, driverBot: driverBot, cfg: cfg, hub: hub, fareSvc: fareSvc}
+	return &TripService{db: db, tripRepo: tripRepo, riderBot: riderBot, driverBot: driverBot, cfg: cfg, hub: hub, fareSvc: fareSvc, payments: payments}
 }
 
 // ScheduleStartReminder schedules a one-off check after StartReminderSeconds. If trip is still WAITING,
@@ -323,39 +325,31 @@ func (s *TripService) FinishTrip(ctx context.Context, tripID string, driverUserI
 				}
 			}
 			if isActive == 1 && liveRecent {
-				// Pay stage2 reward 100000 so'm (stage1 = 20k was paid when referred driver completed application).
-				res, _ := s.db.ExecContext(ctx, `UPDATE drivers SET balance = balance + 100000 WHERE user_id = (SELECT id FROM users WHERE referral_code = ?1)`, referredBy.String)
-				if nr, _ := res.RowsAffected(); nr > 0 {
-					_, _ = s.db.ExecContext(ctx, `UPDATE users SET referral_stage2_reward_paid = 1 WHERE id = ?1`, driverUserID)
+				if err := accounting.TryGrantReferrerStage2Promo(ctx, s.db, driverUserID, referredBy.String); err != nil {
+					log.Printf("trip_service: referrer stage2 promo (driver=%d): %v", driverUserID, err)
 				}
 			}
 		}
 	}
-	// New user bonus: 80k so'm once when driver completes 5 successful trips. Pay only when COUNT(finished) >= 5 and not yet paid.
+	// Five-trip milestone: promotional platform credit (not withdrawable cash), with ledger row.
 	var finishedCount int64
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM trips WHERE driver_user_id = ?1 AND status = ?2`, driverUserID, domain.TripStatusFinished).Scan(&finishedCount)
 	tripsPendingForBonus := 0
 	if finishedCount < 5 {
 		tripsPendingForBonus = 5 - int(finishedCount)
 	}
-	// Atomic: only add bonus when driver has 5+ finished trips AND five_trips_bonus_paid = 0.
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE drivers SET balance = balance + 80000, five_trips_bonus_paid = 1
-		WHERE user_id = ?1 AND COALESCE(five_trips_bonus_paid, 0) = 0
-		  AND (SELECT COUNT(*) FROM trips WHERE driver_user_id = ?1 AND status = ?2) >= 5`,
-		driverUserID, driverUserID, domain.TripStatusFinished)
-	if err != nil {
-		log.Printf("trip_service: five_trips_bonus update failed (driver=%d): %v", driverUserID, err)
-	} else if nr, _ := res.RowsAffected(); nr > 0 && s.driverBot != nil {
+	if granted, err := accounting.TryGrantFiveTripsPromoBonus(ctx, s.db, driverUserID); err != nil {
+		log.Printf("trip_service: five_trips promo bonus (driver=%d): %v", driverUserID, err)
+	} else if granted && s.driverBot != nil {
 		var driverTgID int64
 		if err := s.db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, driverUserID).Scan(&driverTgID); err == nil && driverTgID != 0 {
-			msg := tgbotapi.NewMessage(driverTgID, "🎉 Sizning 80 000 so'm mukofotingiz hisobingizga qo'shildi.")
+			msg := tgbotapi.NewMessage(driverTgID, "🎉 5 ta safar: 80 000 so'm reklama/platforma krediti hisobingizga qo'shildi (naqd emas, yechib bo'lmaydi).")
 			if _, err := s.driverBot.Send(msg); err != nil {
-				log.Printf("trip_service: notify driver 80k bonus: %v", err)
+				log.Printf("trip_service: notify driver 80k promo: %v", err)
 			}
 		}
 	}
-	// Always deduct commission from normalized fare and record payment (fareAmount already normalized).
+	// Internal commission accrual; offset against promo then cash wallet (see driver_ledger); not bank settlement.
 	if s.cfg != nil && fareAmount > 0 {
 		pc := 5
 		if s.fareSvc != nil {
@@ -369,30 +363,11 @@ func (s *TripService) FinishTrip(ctx context.Context, tripID string, driverUserI
 		if pc <= 0 {
 			pc = 5
 		}
-		// Commission = x% of fare price.
 		commission := (fareAmount * int64(pc)) / 100
 		if commission > 0 {
-			// Deduct commission from driver balance.
-			if _, err := s.db.ExecContext(ctx, `
-				UPDATE drivers SET balance = balance - ?1 WHERE user_id = ?2`,
-				commission, driverUserID); err != nil {
-				log.Printf("trip_service: commission balance update failed (trip=%s, driver=%d, commission=%d): %v",
-					tripID, driverUserID, commission, err)
-			} else {
-				// Ensure driver is inactive when balance is 0 or negative.
-				if _, err := s.db.ExecContext(ctx, `
-					UPDATE drivers SET is_active = CASE WHEN balance > 0 THEN is_active ELSE 0 END WHERE user_id = ?1`,
-					driverUserID); err != nil {
-					log.Printf("trip_service: commission is_active sync failed (driver=%d): %v", driverUserID, err)
-				}
-			}
-			// Record commission in payments ledger (trip_id links to trip for total_price in admin API).
-			if _, err := s.db.ExecContext(ctx, `
-				INSERT INTO payments (driver_id, amount, type, note, trip_id)
-				VALUES (?1, ?2, 'commission', 'Trip commission deduction', ?3)`,
-				driverUserID, commission, tripID); err != nil {
-				log.Printf("trip_service: commission payment insert failed (trip=%s, driver=%d, commission=%d): %v",
-					tripID, driverUserID, commission, err)
+			inf := s.cfg != nil && s.cfg.InfiniteDriverBalance
+			if err := accounting.ApplyTripCommission(ctx, s.db, s.payments, driverUserID, tripID, fareAmount, commission, pc, inf); err != nil {
+				log.Printf("trip_service: apply trip commission (trip=%s, driver=%d): %v", tripID, driverUserID, err)
 			}
 		}
 	}
@@ -431,9 +406,9 @@ func (s *TripService) FinishTrip(ctx context.Context, tripID string, driverUserI
 		}
 		// Remind how many trips left until 80k so'm bonus (only if not yet received).
 		if tripsPendingForBonus > 0 && s.driverBot != nil {
-			pendingMsg := fmt.Sprintf("📊 Yana %d ta muvaffaqiyatli safar — 80 000 so'm mukofot sizniki.", tripsPendingForBonus)
+			pendingMsg := fmt.Sprintf("📊 Yana %d ta muvaffaqiyatli safar — 80 000 so'm platforma krediti (naqd emas).", tripsPendingForBonus)
 			if tripsPendingForBonus == 1 {
-				pendingMsg = "📊 Yana 1 ta muvaffaqiyatli safar — 80 000 so'm mukofot sizniki."
+				pendingMsg = "📊 Yana 1 ta muvaffaqiyatli safar — 80 000 so'm platforma krediti (naqd emas)."
 			}
 			if _, err := s.driverBot.Send(tgbotapi.NewMessage(driverTelegramID, pendingMsg)); err != nil {
 				log.Printf("trip_service: notify driver trips pending: %v", err)

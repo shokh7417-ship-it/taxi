@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"taxi-mvp/internal/models"
 )
@@ -12,7 +13,6 @@ type AdminDriverRepository interface {
 	ListDriversWithBalance(ctx context.Context) ([]models.Driver, error)
 	ListRidersForAdmin(ctx context.Context) ([]models.AdminRiderDTO, error)
 	GetDriverByID(ctx context.Context, id int64) (*models.Driver, error)
-	UpdateDriverBalance(ctx context.Context, id int64, delta int64, countPaid bool) error
 	SetDriverBalance(ctx context.Context, id int64, newBalance int64) error
 	UpdateVerificationStatus(ctx context.Context, driverUserID int64, status string) error
 	GetDriverTelegramID(ctx context.Context, driverUserID int64) (int64, error)
@@ -37,6 +37,8 @@ func (r *adminDriverRepo) ListDriversWithBalance(ctx context.Context) ([]models.
 		       COALESCE(d.phone, '') AS phone,
 		       COALESCE(d.car_type, '') AS car_model,
 		       COALESCE(d.plate, '') AS plate_number,
+		       d.promo_balance,
+		       d.cash_balance,
 		       d.balance,
 		       d.total_paid,
 		       COALESCE(d.verification_status, '') AS verification_status,
@@ -57,7 +59,7 @@ func (r *adminDriverRepo) ListDriversWithBalance(ctx context.Context) ([]models.
 	var out []models.Driver
 	for rows.Next() {
 		var d models.Driver
-		if err := rows.Scan(&d.ID, &d.Name, &d.Phone, &d.CarModel, &d.PlateNumber, &d.Balance, &d.TotalPaid, &d.VerificationStatus,
+		if err := rows.Scan(&d.ID, &d.Name, &d.Phone, &d.CarModel, &d.PlateNumber, &d.PromoBalance, &d.CashBalance, &d.Balance, &d.TotalPaid, &d.VerificationStatus,
 			&d.HasDriverTerms, &d.HasUserTerms, &d.HasPrivacy); err != nil {
 			return nil, err
 		}
@@ -109,6 +111,8 @@ func (r *adminDriverRepo) GetDriverByID(ctx context.Context, id int64) (*models.
 		       COALESCE(d.phone, '') AS phone,
 		       COALESCE(d.car_type, '') AS car_model,
 		       COALESCE(d.plate, '') AS plate_number,
+		       d.promo_balance,
+		       d.cash_balance,
 		       d.balance,
 		       d.total_paid,
 		       COALESCE(d.verification_status, '') AS verification_status
@@ -116,7 +120,7 @@ func (r *adminDriverRepo) GetDriverByID(ctx context.Context, id int64) (*models.
 		JOIN users u ON u.id = d.user_id
 		WHERE d.user_id = ?1`, id)
 	var d models.Driver
-	if err := row.Scan(&d.ID, &d.Name, &d.Phone, &d.CarModel, &d.PlateNumber, &d.Balance, &d.TotalPaid, &d.VerificationStatus); err != nil {
+	if err := row.Scan(&d.ID, &d.Name, &d.Phone, &d.CarModel, &d.PlateNumber, &d.PromoBalance, &d.CashBalance, &d.Balance, &d.TotalPaid, &d.VerificationStatus); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -125,44 +129,21 @@ func (r *adminDriverRepo) GetDriverByID(ctx context.Context, id int64) (*models.
 	return &d, nil
 }
 
-// UpdateDriverBalance adjusts balance (and optionally total_paid) inside a transaction.
-func (r *adminDriverRepo) UpdateDriverBalance(ctx context.Context, id int64, delta int64, countPaid bool) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if countPaid && delta > 0 {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE drivers
-			SET balance = balance + ?1,
-			    total_paid = total_paid + ?1
-			WHERE user_id = ?2`, delta, id); err != nil {
-			return err
-		}
-	} else {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE drivers
-			SET balance = balance + ?1
-			WHERE user_id = ?2`, delta, id); err != nil {
-			return err
-		}
-	}
-	// Do not force is_active on top-up: driver online state follows Telegram live location only; zero balance still clears active below.
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE drivers SET is_active = CASE WHEN balance <= 0 THEN 0 ELSE is_active END WHERE user_id = ?1`, id); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// SetDriverBalance sets balance to an exact value. is_active is cleared when balance <= 0; otherwise unchanged (live location drives online).
+// SetDriverBalance sets total wallet (promo+cash) by adjusting cash_balance only; promo_balance is unchanged.
+// Cannot set total below current promo_balance (would require reducing promotional credit — use a dedicated admin flow).
 func (r *adminDriverRepo) SetDriverBalance(ctx context.Context, id int64, newBalance int64) error {
+	var promo int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(promo_balance, 0) FROM drivers WHERE user_id = ?1`, id).Scan(&promo); err != nil {
+		return err
+	}
+	if newBalance < promo {
+		return fmt.Errorf("total cannot be less than promo_balance (%d); promo credit is not reduced via SetDriverBalance", promo)
+	}
+	cash := newBalance - promo
 	_, err := r.db.ExecContext(ctx, `
-		UPDATE drivers SET balance = ?1,
-		  is_active = CASE WHEN ?1 <= 0 THEN 0 ELSE is_active END
-		WHERE user_id = ?2`, newBalance, id)
+		UPDATE drivers SET cash_balance = ?1, balance = ?2,
+		  is_active = CASE WHEN ?2 <= 0 THEN 0 ELSE is_active END
+		WHERE user_id = ?3`, cash, newBalance, id)
 	return err
 }
 

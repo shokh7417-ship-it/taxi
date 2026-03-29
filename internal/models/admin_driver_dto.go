@@ -7,6 +7,9 @@ type AdminDriverDTO struct {
 	Phone              string `json:"phone"`
 	CarModel           string `json:"car_model"`
 	PlateNumber        string `json:"plate_number"`
+	PromoBalance int64 `json:"promo_balance"` // platform promotional credit only (not withdrawable)
+	CashBalance  int64 `json:"cash_balance"`  // real-wallet leg (admin top-ups; future settlement)
+	// Balance is promo_balance + cash_balance for dashboards that expect one total field.
 	Balance            int64  `json:"balance"`
 	TotalPaid          int64  `json:"total_paid"`
 	Status             string `json:"status"`             // "ACTIVE" or "INACTIVE"

@@ -2,38 +2,47 @@ package services
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
+	"taxi-mvp/internal/accounting"
 	"taxi-mvp/internal/models"
 	"taxi-mvp/internal/repositories"
 )
 
 // DashboardSummary is returned by the admin dashboard endpoint.
 type DashboardSummary struct {
-	TotalDrivers        int64 `json:"total_drivers"`
-	ActiveDrivers       int64 `json:"active_drivers"`
-	InactiveDrivers     int64 `json:"inactive_drivers"`
-	TotalDriverBalances int64 `json:"total_driver_balances"`
-	TodaysTrips         int64 `json:"todays_trips"`
+	TotalDrivers          int64 `json:"total_drivers"`
+	ActiveDrivers         int64 `json:"active_drivers"`
+	InactiveDrivers       int64 `json:"inactive_drivers"`
+	TotalDriverBalances   int64 `json:"total_driver_balances"`   // promo + cash (compat)
+	TotalPromoBalances    int64 `json:"total_promo_balances"`    // platform promotional credit only
+	TotalCashBalances     int64 `json:"total_cash_balances"`     // real-wallet leg
+	TodaysTrips           int64 `json:"todays_trips"`
 }
 
 // AdminService coordinates admin-facing driver, payment, and dashboard operations.
 type AdminService struct {
+	db       *sql.DB
 	drivers  repositories.AdminDriverRepository
 	payments repositories.PaymentRepository
 	trips    repositories.TripStatsRepository
+	ledger   *repositories.DriverLedgerRepository
 }
 
 // NewAdminService constructs an AdminService.
 func NewAdminService(
+	db *sql.DB,
 	drivers repositories.AdminDriverRepository,
 	payments repositories.PaymentRepository,
 	trips repositories.TripStatsRepository,
 ) *AdminService {
 	return &AdminService{
+		db:       db,
 		drivers:  drivers,
 		payments: payments,
 		trips:    trips,
+		ledger:   repositories.NewDriverLedgerRepository(db),
 	}
 }
 
@@ -55,6 +64,8 @@ func (s *AdminService) ListDrivers(ctx context.Context) ([]models.AdminDriverDTO
 			Phone:              d.Phone,
 			CarModel:           d.CarModel,
 			PlateNumber:        d.PlateNumber,
+			PromoBalance:       d.PromoBalance,
+			CashBalance:        d.CashBalance,
 			Balance:            d.Balance,
 			TotalPaid:          d.TotalPaid,
 			Status:             status,
@@ -72,6 +83,14 @@ func (s *AdminService) ListRiders(ctx context.Context) ([]models.AdminRiderDTO, 
 	return s.drivers.ListRidersForAdmin(ctx)
 }
 
+// ListDriverLedger returns recent driver_ledger rows (audit: promo vs cash).
+func (s *AdminService) ListDriverLedger(ctx context.Context, driverID int64, limit int) ([]models.DriverLedgerEntry, error) {
+	if s.ledger == nil {
+		return nil, nil
+	}
+	return s.ledger.ListByDriver(ctx, driverID, limit)
+}
+
 // SetDriverVerification sets verification_status to "approved" or "rejected". Returns the driver's Telegram ID for notification.
 func (s *AdminService) SetDriverVerification(ctx context.Context, driverUserID int64, status string) (telegramID int64, err error) {
 	if status != "approved" && status != "rejected" {
@@ -84,23 +103,15 @@ func (s *AdminService) SetDriverVerification(ctx context.Context, driverUserID i
 	return telegramID, err
 }
 
-// AddDriverBalance records a positive deposit to a driver's balance.
-// amountCents must be > 0 and is in the smallest currency units.
+// AddDriverBalance records a cash-wallet top-up only (not promotional credit). Creates driver_ledger CASH_TOPUP + payments deposit.
 func (s *AdminService) AddDriverBalance(ctx context.Context, driverID int64, amountCents int64, note string) error {
 	if amountCents <= 0 {
 		return nil
 	}
-	// Increase balance and total_paid.
-	if err := s.drivers.UpdateDriverBalance(ctx, driverID, amountCents, true); err != nil {
-		return err
+	if s.db == nil {
+		return nil
 	}
-	p := &models.Payment{
-		DriverID: driverID,
-		Amount:   amountCents,
-		Type:     models.PaymentTypeDeposit,
-		Note:     note,
-	}
-	return s.payments.InsertPayment(ctx, p)
+	return accounting.GrantCashTopUp(ctx, s.db, s.payments, driverID, amountCents, note)
 }
 
 // ListPayments returns payment history, optionally filtered by driver.
@@ -123,6 +134,8 @@ func (s *AdminService) GetDashboard(ctx context.Context) (*DashboardSummary, err
 			summary.InactiveDrivers++
 		}
 		summary.TotalDriverBalances += d.Balance
+		summary.TotalPromoBalances += d.PromoBalance
+		summary.TotalCashBalances += d.CashBalance
 	}
 	day := time.Now().UTC().Truncate(24 * time.Hour)
 	tripsToday, err := s.trips.CountTripsForDay(ctx, day)
@@ -132,4 +145,3 @@ func (s *AdminService) GetDashboard(ctx context.Context) (*DashboardSummary, err
 	summary.TodaysTrips = tripsToday
 	return &summary, nil
 }
-

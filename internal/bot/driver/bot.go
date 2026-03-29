@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"taxi-mvp/internal/accounting"
 	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/domain"
 	"taxi-mvp/internal/driverloc"
@@ -417,10 +418,13 @@ func driverKeyboardForVerificationPending() tgbotapi.ReplyKeyboardMarkup {
 }
 
 // formatStatusPanelText returns the status panel text (same layout as /status and pinned panel).
-// Holat follows Telegram live location only (not is_active alone). Platform vs cash wallet: single-ledger DB uses balance as platform credit; cash line is 0 until split (see README).
+// Holat follows Telegram live location only (not is_active alone). balance = promo_balance + cash_balance (total internal wallet for dispatch).
 func formatStatusPanelText(ctx context.Context, db *sql.DB, cfg *config.Config, userID int64) (string, error) {
-	var balance int64
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(balance, 0) FROM drivers WHERE user_id = ?1`, userID).Scan(&balance); err != nil {
+	var promoBal, cashBal, balance int64
+	err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(promo_balance, 0), COALESCE(cash_balance, 0), COALESCE(balance, 0)
+		FROM drivers WHERE user_id = ?1`, userID).Scan(&promoBal, &cashBal, &balance)
+	if err != nil {
 		return "", err
 	}
 	liveOK := isDriverSharingLiveLocation(ctx, db, userID)
@@ -434,13 +438,12 @@ func formatStatusPanelText(ctx context.Context, db *sql.DB, cfg *config.Config, 
 	if liveOK {
 		locLine = "✅ Jonli lokatsiya ulangan"
 	}
-	platformCredit := balance
-	cashBal := int64(0)
+	platformCredit := promoBal
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "📊 Haydovchi holati\n\nHolat: %s\nLokatsiya: %s\n\n", holat, locLine)
-	fmt.Fprintf(&b, "💰 Platform krediti: %d so'm\n(Real pul emas, naqdlashtirilmaydi)\n\n", platformCredit)
-	fmt.Fprintf(&b, "💵 Pul balansi: %d so'm", cashBal)
+	fmt.Fprintf(&b, "💰 Promo / platform krediti: %d so'm\n(Real pul emas, naqdlashtirilmaydi)\n\n", platformCredit)
+	fmt.Fprintf(&b, "💵 Ichki pul balansi (top-up): %d so'm\nJami: %d so'm", cashBal, balance)
 	if !liveOK {
 		fmt.Fprintf(&b, "\n\n⚠️ Ishlash uchun jonli lokatsiyani ulashing.")
 	} else if !balOK {
@@ -1589,12 +1592,10 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 				log.Printf("driver: approve driver update error user_id=%d: %v", driverUserID, err)
 				return
 			}
-			// Signup bonus: add 100 000 so'm once AFTER approval.
-			_, _ = db.ExecContext(ctx, `
-				UPDATE drivers
-				SET balance = balance + 100000,
-				    signup_bonus_paid = 1
-				WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, driverUserID)
+			// Startup promotional platform credit (not withdrawable cash); ledger PROMO_GRANTED.
+			if err := accounting.TryGrantSignupPromoOnce(ctx, db, driverUserID); err != nil {
+				log.Printf("driver: signup promo grant user_id=%d: %v", driverUserID, err)
+			}
 			log.Printf("driver: driver approved by admin user_id=%d", driverUserID)
 			if notified != 0 {
 				// Approval already notified via some other path.

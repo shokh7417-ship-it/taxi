@@ -59,7 +59,7 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	adminDriverRepo := repositories.NewAdminDriverRepository(db)
 	paymentRepo := repositories.NewPaymentRepository(db)
 	tripStatsRepo := repositories.NewTripStatsRepository(db)
-	adminSvc := services.NewAdminService(adminDriverRepo, paymentRepo, tripStatsRepo)
+	adminSvc := services.NewAdminService(db, adminDriverRepo, paymentRepo, tripStatsRepo)
 	adminHandlers := handlers.NewAdminHandlers(adminSvc, driverBot, db)
 	adminHandlers.Register(r)
 	return r

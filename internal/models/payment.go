@@ -11,7 +11,8 @@ const (
 	PaymentTypeAdjustment PaymentType = "adjustment"
 )
 
-// Payment is a ledger entry for a driver's balance.
+// Payment is a legacy admin export row (deposits and internal commission records).
+// Authoritative audit trail for promo vs cash is driver_ledger; see README accounting section.
 type Payment struct {
 	ID         int64       `db:"id" json:"id"`
 	DriverID   int64       `db:"driver_id" json:"driver_id"`

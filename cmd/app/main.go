@@ -60,8 +60,9 @@ func main() {
 	hub := ws.NewHub()
 	go hub.Run()
 	tripRepo := repositories.NewTripRepo(database)
+	paymentRepo := repositories.NewPaymentRepository(database)
 	fareSvc := services.NewFareService(database, cfg)
-	tripSvc := services.NewTripService(database, tripRepo, riderBot, driverBot, cfg, hub, fareSvc)
+	tripSvc := services.NewTripService(database, tripRepo, riderBot, driverBot, cfg, hub, fareSvc, paymentRepo)
 	tripSvc.OnDriverStatusUpdate = func(telegramID int64) {
 		driverbot.UpdatePinnedStatusForChat(driverBot, database, cfg, telegramID)
 	}

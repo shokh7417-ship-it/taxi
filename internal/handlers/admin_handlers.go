@@ -31,6 +31,7 @@ func (h *AdminHandlers) Register(r *gin.Engine) {
 	g := r.Group("/admin")
 	{
 		g.GET("/drivers", h.ListDrivers)
+		g.GET("/drivers/:id/ledger", h.ListDriverLedger)
 		g.GET("/riders", h.ListRiders)
 		g.POST("/drivers/:id/add-balance", h.AddBalance)
 		g.POST("/drivers/:id/verify", h.VerifyDriver)
@@ -98,7 +99,29 @@ func (h *AdminHandlers) VerifyDriver(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// AddBalance performs a manual deposit/top-up to driver balance.
+// ListDriverLedger returns append-only driver_ledger rows for audit (promo vs cash).
+func (h *AdminHandlers) ListDriverLedger(c *gin.Context) {
+	idStr := c.Param("id")
+	driverID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || driverID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid driver id"})
+		return
+	}
+	limit := 500
+	if s := c.Query("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	rows, err := h.svc.ListDriverLedger(c.Request.Context(), driverID, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list ledger"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"driver_id": driverID, "entries": rows})
+}
+
+// AddBalance performs a manual cash-wallet top-up (not promo credit); see README accounting model.
 func (h *AdminHandlers) AddBalance(c *gin.Context) {
 	idStr := c.Param("id")
 	driverID, err := strconv.ParseInt(idStr, 10, 64)

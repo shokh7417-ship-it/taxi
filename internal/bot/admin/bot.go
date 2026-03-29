@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"taxi-mvp/internal/accounting"
 	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/services"
 )
@@ -191,12 +192,9 @@ func handleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB
 			log.Printf("admin bot: approve driver update error user_id=%d: %v", driverUserID, err)
 			return
 		}
-		// Signup bonus: add 100 000 so'm once AFTER approval.
-		_, _ = db.ExecContext(ctx, `
-			UPDATE drivers
-			SET balance = balance + 100000,
-			    signup_bonus_paid = 1
-			WHERE user_id = ?1 AND COALESCE(signup_bonus_paid, 0) = 0`, driverUserID)
+		if err := accounting.TryGrantSignupPromoOnce(ctx, db, driverUserID); err != nil {
+			log.Printf("admin bot: signup promo grant user_id=%d: %v", driverUserID, err)
+		}
 		// Do not send to driver from admin bot (driver has no chat with admin bot → "chat not found").
 		// Driver approval notifier sends approval + bonus + keyboard via driver bot.
 

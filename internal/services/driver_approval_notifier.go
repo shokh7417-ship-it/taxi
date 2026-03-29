@@ -58,7 +58,7 @@ func notifyApprovedDrivers(ctx context.Context, db *sql.DB, driverBot *tgbotapi.
 		// 2) Bonuslar haqida xabar (agar hali yuborilmagan bo'lsa)
 		var welcomeSent int
 		if err := db.QueryRowContext(ctx, `SELECT COALESCE(welcome_bonus_message_sent, 0) FROM drivers WHERE user_id = ?1`, userID).Scan(&welcomeSent); err == nil && welcomeSent == 0 {
-			welcome := tgbotapi.NewMessage(telegramID, "🎁 Haydovchi bonuslari\n\n1️⃣ Yangi haydovchi bonusi: 100 000 so'm platform krediti (hisobingizga qo'shildi)\n\n2️⃣ Online bonus: 1 soat online → +2 000 so'm. Kunlik limit: 20 000 so'm")
+			welcome := tgbotapi.NewMessage(telegramID, "🎁 Haydovchi bonuslari\n\n1️⃣ Yangi haydovchi: 100 000 so'm promo/platforma krediti (real pul emas, yechib bo'lmaydi)\n\n2️⃣ Online bonus: promo kredit sifatida, 1 soat → +2 000 so'm. Kunlik limit: 20 000 so'm")
 			if _, err := driverBot.Send(welcome); err != nil {
 				log.Printf("driver_approval_notifier: send welcome bonus message user_id=%d: %v", userID, err)
 			} else {

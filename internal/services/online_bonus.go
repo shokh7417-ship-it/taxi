@@ -8,6 +8,8 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"taxi-mvp/internal/models"
+	"taxi-mvp/internal/repositories"
 )
 
 const (
@@ -99,19 +101,46 @@ func runOnlineBonusAccrual(ctx context.Context, db *sql.DB, driverBot *tgbotapi.
 		}
 
 		nowStr := now.Format("2006-01-02 15:04:05")
-		res, err := db.ExecContext(ctx, `
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			log.Printf("online_bonus: begin tx driver %d: %v", userID, err)
+			continue
+		}
+		res, err := tx.ExecContext(ctx, `
 			UPDATE drivers
-			SET balance = balance + ?1,
+			SET promo_balance = promo_balance + ?1,
+			    balance = balance + ?1,
 			    online_bonus_so_m_today = online_bonus_so_m_today + ?1,
 			    online_bonus_last_credited_at = ?2,
 			    online_bonus_last_day = ?3
 			WHERE user_id = ?4`,
 			toAdd, nowStr, today, userID)
 		if err != nil {
+			_ = tx.Rollback()
 			log.Printf("online_bonus: update driver %d: %v", userID, err)
 			continue
 		}
 		if nr, _ := res.RowsAffected(); nr == 0 {
+			_ = tx.Rollback()
+			continue
+		}
+		note := "Online time promotional platform credit (not withdrawable cash)."
+		refType := "online_bonus"
+		ledger := repositories.NewDriverLedgerRepository(db)
+		if err := ledger.InsertTx(ctx, tx, &models.DriverLedgerEntry{
+			DriverID:      userID,
+			Bucket:        models.LedgerBucketPromo,
+			EntryType:     models.LedgerEntryPromoGranted,
+			Amount:        toAdd,
+			ReferenceType: &refType,
+			Note:          &note,
+		}); err != nil {
+			_ = tx.Rollback()
+			log.Printf("online_bonus: ledger driver %d: %v", userID, err)
+			continue
+		}
+		if err := tx.Commit(); err != nil {
+			log.Printf("online_bonus: commit driver %d: %v", userID, err)
 			continue
 		}
 

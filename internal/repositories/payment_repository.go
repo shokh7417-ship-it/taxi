@@ -11,6 +11,7 @@ import (
 // PaymentRepository defines operations on the payments ledger.
 type PaymentRepository interface {
 	InsertPayment(ctx context.Context, p *models.Payment) error
+	InsertPaymentTx(ctx context.Context, tx *sql.Tx, p *models.Payment) error
 	ListPayments(ctx context.Context, driverID *int64, from, to *time.Time) ([]models.Payment, error)
 }
 
@@ -25,15 +26,32 @@ func NewPaymentRepository(db *sql.DB) PaymentRepository {
 
 // InsertPayment inserts a new payment row and populates ID and CreatedAt on the struct.
 func (r *paymentRepo) InsertPayment(ctx context.Context, p *models.Payment) error {
+	return r.insertPayment(ctx, nil, p)
+}
+
+// InsertPaymentTx inserts a payment inside an existing transaction.
+func (r *paymentRepo) InsertPaymentTx(ctx context.Context, tx *sql.Tx, p *models.Payment) error {
+	return r.insertPayment(ctx, tx, p)
+}
+
+func (r *paymentRepo) insertPayment(ctx context.Context, tx *sql.Tx, p *models.Payment) error {
 	var res sql.Result
 	var err error
+	var execer interface {
+		ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+	}
+	if tx != nil {
+		execer = tx
+	} else {
+		execer = r.db
+	}
 	if p.TripID != nil && *p.TripID != "" {
-		res, err = r.db.ExecContext(ctx, `
+		res, err = execer.ExecContext(ctx, `
 			INSERT INTO payments (driver_id, amount, type, note, trip_id)
 			VALUES (?1, ?2, ?3, ?4, ?5)`,
 			p.DriverID, p.Amount, string(p.Type), p.Note, *p.TripID)
 	} else {
-		res, err = r.db.ExecContext(ctx, `
+		res, err = execer.ExecContext(ctx, `
 			INSERT INTO payments (driver_id, amount, type, note)
 			VALUES (?1, ?2, ?3, ?4)`,
 			p.DriverID, p.Amount, string(p.Type), p.Note)
@@ -46,9 +64,11 @@ func (r *paymentRepo) InsertPayment(ctx context.Context, p *models.Payment) erro
 		return err
 	}
 	p.ID = id
-	// Load created_at from DB to have authoritative timestamp.
-	return r.db.QueryRowContext(ctx, `SELECT created_at FROM payments WHERE id = ?1`, id).
-		Scan(&p.CreatedAt)
+	q := `SELECT created_at FROM payments WHERE id = ?1`
+	if tx != nil {
+		return tx.QueryRowContext(ctx, q, id).Scan(&p.CreatedAt)
+	}
+	return r.db.QueryRowContext(ctx, q, id).Scan(&p.CreatedAt)
 }
 
 // ListPayments returns payments ordered by created_at DESC, optionally filtered.
@@ -98,4 +118,3 @@ func (r *paymentRepo) ListPayments(ctx context.Context, driverID *int64, from, t
 	}
 	return out, nil
 }
-
