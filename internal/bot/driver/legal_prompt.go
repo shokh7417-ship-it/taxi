@@ -11,9 +11,10 @@ import (
 	"taxi-mvp/internal/legal"
 )
 
-// sendDriverAgreementForDriver sends the full oferta when the active legal bundle is new to this driver (or alwaysFull);
-// if they were already shown this bundle but have not accepted yet, sends a short nudge with the same inline keyboard.
-func sendDriverAgreementForDriver(bot *tgbotapi.BotAPI, db *sql.DB, chatID, userID int64, alwaysFull bool) {
+// sendDriverAgreementForDriver sends the latest active oferta from the DB when the driver is not fully compliant.
+// periodicNudgeOnly: if true, when we already prompted this fingerprint and the driver still has not accepted, send only a short
+// reminder (used by RunLegalReacceptNotifier). If false (/start, live block, etc.), always send full oferta text so the chat always has the contract.
+func sendDriverAgreementForDriver(bot *tgbotapi.BotAPI, db *sql.DB, chatID, userID int64, alwaysFull, periodicNudgeOnly bool) {
 	if bot == nil {
 		return
 	}
@@ -26,7 +27,10 @@ func sendDriverAgreementForDriver(bot *tgbotapi.BotAPI, db *sql.DB, chatID, user
 			return
 		}
 		var stored sql.NullString
-		_ = db.QueryRowContext(ctx, `SELECT legal_terms_prompt_fingerprint FROM drivers WHERE user_id = ?1`, userID).Scan(&stored)
+		if err := db.QueryRowContext(ctx, `SELECT legal_terms_prompt_fingerprint FROM drivers WHERE user_id = ?1`, userID).Scan(&stored); err != nil && err != sql.ErrNoRows {
+			log.Printf("driver: read legal_terms_prompt_fingerprint (sync) user_id=%d: %v", userID, err)
+			stored = sql.NullString{}
+		}
 		st := ""
 		if stored.Valid {
 			st = strings.TrimSpace(stored.String)
@@ -49,12 +53,15 @@ func sendDriverAgreementForDriver(bot *tgbotapi.BotAPI, db *sql.DB, chatID, user
 		return
 	}
 	var stored sql.NullString
-	_ = db.QueryRowContext(ctx, `SELECT legal_terms_prompt_fingerprint FROM drivers WHERE user_id = ?1`, userID).Scan(&stored)
+	if err := db.QueryRowContext(ctx, `SELECT legal_terms_prompt_fingerprint FROM drivers WHERE user_id = ?1`, userID).Scan(&stored); err != nil && err != sql.ErrNoRows {
+		log.Printf("driver: read legal_terms_prompt_fingerprint user_id=%d: %v", userID, err)
+		stored = sql.NullString{}
+	}
 	st := ""
 	if stored.Valid {
 		st = strings.TrimSpace(stored.String)
 	}
-	if !alwaysFull && st == fp {
+	if periodicNudgeOnly && !alwaysFull && st == fp {
 		m := tgbotapi.NewMessage(chatID, "⚠️ Yangilangan shartnomani qabul qilish uchun «✅ Qabul qilaman» tugmasini bosing.")
 		m.ReplyMarkup = driverAgreementInlineKeyboard()
 		if _, err := bot.Send(m); err != nil {
@@ -113,6 +120,6 @@ func runLegalReacceptTick(ctx context.Context, db *sql.DB, bot *tgbotapi.BotAPI)
 		if err := rows.Scan(&uid, &tg); err != nil {
 			continue
 		}
-		sendDriverAgreementForDriver(bot, db, tg, uid, false)
+		sendDriverAgreementForDriver(bot, db, tg, uid, false, true)
 	}
 }

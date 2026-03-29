@@ -726,7 +726,7 @@ func handleStart(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, chatID, t
 	// Application is "complete" once both doc photos exist. /start does not re-run the form, so resend oferta whenever
 	// the driver still owes active legal acceptances (any verification_status, incl. NULL or rejected+re-upload edge cases).
 	if !driverHasAcceptedAgreement(ctx, db, userID) {
-		sendDriverAgreementForDriver(bot, db, chatID, userID, false)
+		sendDriverAgreementForDriver(bot, db, chatID, userID, false, false)
 		if !driverHasAcceptedAgreement(ctx, db, userID) {
 			send(bot, chatID, "⚠️ Admin tasdiqigacha buyurtma olish uchun shartnomani qabul qilishingiz kerak.")
 		}
@@ -960,7 +960,7 @@ func handleApplicationPhoto(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config
 
 	// Require driver agreement (oferta) before sending admin approval request.
 	if !driverHasAcceptedAgreement(ctx, db, userID) {
-		sendDriverAgreementForDriver(bot, db, chatID, userID, true)
+		sendDriverAgreementForDriver(bot, db, chatID, userID, true, false)
 		send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
 		return true
 	}
@@ -1378,7 +1378,7 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 		}
 		if !driverLegalAllowsLiveSharing(ctx, db, userID) {
 			send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
-			sendDriverAgreementForDriver(bot, db, chatID, userID, true)
+			sendDriverAgreementForDriver(bot, db, chatID, userID, true, false)
 			return
 		}
 		_, _ = db.ExecContext(ctx, `
@@ -1405,7 +1405,7 @@ func handleLiveLocationUpdate(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Conf
 	}
 	if !driverLegalAllowsLiveSharing(ctx, db, userID) {
 		_ = legal.NewService(db).SetPendingResume(ctx, userID, resumeDriverRelive, "")
-		sendDriverAgreementForDriver(bot, db, chatID, userID, true)
+		sendDriverAgreementForDriver(bot, db, chatID, userID, true, false)
 		send(bot, chatID, "⚠️ Avval shartnomani qabul qilishingiz kerak.")
 		return
 	}
@@ -1712,7 +1712,7 @@ func handleAccept(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, assignme
 		} else {
 			_ = lSvc.SetPendingResume(ctx, userID, resumeDriverAccept, requestID)
 		}
-		sendDriverAgreementForDriver(bot, db, chatID, userID, true)
+		sendDriverAgreementForDriver(bot, db, chatID, userID, true, false)
 		send(bot, chatID, "⚠️ Buyurtma qabul qilish uchun avval barcha hujjatlarni qabul qiling.")
 		return
 	}
