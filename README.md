@@ -62,6 +62,7 @@ Create a **`.env`** in the project root (optional: use [godotenv](https://github
 | `INFINITE_DRIVER_BALANCE` | If `true`, dispatch ignores balance and trip commission is skipped |
 | `COMMISSION_PERCENT` | Platform commission on normalized fare when infinite balance is off |
 | `DISPATCH_WAIT_SECONDS`, `DISPATCH_DRIVER_COOLDOWN_SECONDS` | Batch wait and per-driver cooldown |
+| `PICKUP_START_MAX_METERS` | Default **100**. Driver must be within this distance (meters) of the rider pickup to **`POST /trip/start`** from **`WAITING`**, or to **`POST /trip/arrived`**. Uses **Telegram live location** on the server (`drivers.last_lat` / `last_lng`, `live_location_active`, `last_live_location_at` ≤ **90s**). |
 
 Secrets must not be committed. This repo’s `.gitignore` ignores `.env*`.
 
@@ -103,6 +104,7 @@ Notable migration themes:
 | Promo / ledger | `035_driver_promo_cash_ledger.sql`; `038` first-3-trip ledger uniqueness; `040` referral ledger uniqueness |
 | Referrals | `017_referral_fields.sql`, `019_driver_referral_reward_stages.sql`, **`039_driver_referrals.sql`** |
 | Legal | `034_legal_documents_schema_rebuild.sql` and later legal admin versions |
+| Trips | **`041_trips_arrived_status.sql`** — adds **`ARRIVED`** trip status and **`arrived_at`** (pickup-before-start flow) |
 
 ---
 
@@ -124,9 +126,10 @@ Driver routes use **`tryDriverID`** then **`RequireDriverAuth`** (Telegram initD
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/trip/:id` | Trip info |
+| `GET` | `/trip/:id` | Trip info (`status` may be **`WAITING`**, **`ARRIVED`**, **`STARTED`**, …) |
 | `POST` | `/driver/location` | Driver location ping (map tracking; **live location** drives dispatch) |
-| `POST` | `/trip/start` | Start assigned trip |
+| `POST` | `/trip/arrived` | **`WAITING` → `ARRIVED`**: server checks pickup distance + fresh Telegram live location (same rules as starting from `WAITING`). Optional explicit “at pickup” step. Body: `{ "trip_id" }`. |
+| `POST` | `/trip/start` | **`WAITING` or `ARRIVED` → `STARTED`**. From **`WAITING`**, server enforces near-pickup + live location (do not rely on Mini App alone). From **`ARRIVED`**, proximity is **not** re-checked. Distance/fare accumulation still only after **`STARTED`**. On failure: e.g. too early → **400** with Uzbek message *“Mijozga hali yetib bormagansiz…”* |
 | `POST` | `/trip/finish` | Finish trip (triggers promos, referral reward evaluation, commission) |
 | `POST` | `/trip/cancel/driver` | Driver cancel |
 | `POST` | `/trip/cancel/rider` | Rider cancel (`riderAuth`) |
@@ -193,7 +196,7 @@ You deploy **(A)** static Mini App and **(B)** one **backend** process talking t
 | Auth | `internal/auth/` |
 | Config | `internal/config/` |
 
-**Trip flow:** PENDING request → assigned driver → STARTED → FINISHED (or cancelled). WebSocket events include location updates, start, finish, cancel.
+**Trip flow:** PENDING request → assigned driver → trip **`WAITING`** → (optional **`POST /trip/arrived`** → **`ARRIVED`**) → **`POST /trip/start`** → **`STARTED`** → **`FINISHED`** (or cancelled). The server rejects **`STARTED`** from **`WAITING`** unless the driver is near pickup with fresh Telegram live location (see **`PICKUP_START_MAX_METERS`**), or the trip is already **`ARRIVED`**. Live route distance and fare math apply only after **`STARTED`**. WebSocket events include location updates, start, finish, cancel.
 
 ---
 
@@ -248,7 +251,7 @@ All amounts below are **promo platform credit** unless stated otherwise: **not r
 
 1. **Start:** `docker compose up --build` (or local binary) with valid **Turso** env and **migrations applied**.
 2. **Rider:** Create request; confirm pricing and dispatch behavior.
-3. **Driver:** Share **live** location; accept request; open Mini App; **start** / **finish** trip.
+3. **Driver:** Share **live** location; accept request; open Mini App; near pickup, **`/trip/start`** (or **`/trip/arrived`** then **`/trip/start`**); **finish** trip.
 4. **Finish:** Rider and driver notifications; **promo** and **referral** grants visible in DB (`drivers.promo_balance`, `driver_ledger`).
 5. **Admin / legal:** If used, verify verification and legal acceptance flows.
 6. **Shutdown:** SIGINT/SIGTERM; process exits cleanly.
