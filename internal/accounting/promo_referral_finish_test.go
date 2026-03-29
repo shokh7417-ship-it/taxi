@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"taxi-mvp/internal/domain"
@@ -62,10 +63,7 @@ func setupAccountingTestDB(t *testing.T) *sql.DB {
 		expires_at TEXT,
 		created_at TEXT NOT NULL DEFAULT (datetime('now'))
 	);`)
-	exec(`CREATE UNIQUE INDEX idx_first3 ON driver_ledger(driver_id, reference_id)
-		WHERE reference_type = 'first_3_trip_bonus' AND entry_type = 'PROMO_GRANTED';`)
-	exec(`CREATE UNIQUE INDEX idx_ref ON driver_ledger(driver_id, reference_id)
-		WHERE reference_type = 'referral_reward' AND entry_type = 'PROMO_GRANTED';`)
+	exec(`CREATE UNIQUE INDEX idx_driver_ledger_driver_ref_type_id ON driver_ledger(driver_id, reference_type, reference_id);`)
 	return db
 }
 
@@ -218,15 +216,98 @@ func TestTryGrantReferralReward_NotUntilThirdTrip(t *testing.T) {
 	}
 }
 
-func TestTryGrantReferralReward_EmptyTripIDSkips(t *testing.T) {
+func TestTryGrantReferralReward_EmptyTripIDReturnsError(t *testing.T) {
 	db := setupAccountingTestDB(t)
 	defer db.Close()
 	ctx := context.Background()
 	_, _ = db.Exec(`INSERT INTO users (id) VALUES (11)`)
 	_, _ = db.Exec(`INSERT INTO drivers (user_id) VALUES (11)`)
 	r, err := TryGrantReferralReward(ctx, db, 11, "")
-	if err != nil || r.Granted || r.Reason != ReferralRewardReasonEmptyTripID {
-		t.Fatalf("empty trip id: %+v err=%v", r, err)
+	if !errors.Is(err, ErrEmptyTripID) || r.Granted || r.Reason != ReferralRewardReasonEmptyTripID {
+		t.Fatalf("empty trip id: %+v err=%v want ErrEmptyTripID", r, err)
+	}
+}
+
+func TestTryGrantFirstThreeTripPromo_EmptyTripIDReturnsError(t *testing.T) {
+	db := setupAccountingTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	_, _ = db.Exec(`INSERT INTO users (id) VALUES (1)`)
+	_, _ = db.Exec(`INSERT INTO drivers (user_id) VALUES (1)`)
+	_, _, err := TryGrantFirstThreeTripPromo(ctx, db, 1, "  ")
+	if !errors.Is(err, ErrEmptyTripID) {
+		t.Fatalf("want ErrEmptyTripID got %v", err)
+	}
+}
+
+func TestGrantTripFinishPromosAndReferral_DoubleCallIdempotent(t *testing.T) {
+	db := setupAccountingTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	_, _ = db.Exec(`INSERT INTO users (id, referral_code) VALUES (10, 'inv1')`)
+	_, _ = db.Exec(`INSERT INTO users (id, referred_by) VALUES (11, 'inv1')`)
+	_, _ = db.Exec(`INSERT INTO drivers (user_id) VALUES (10)`)
+	_, _ = db.Exec(`INSERT INTO drivers (user_id) VALUES (11)`)
+	addFinished := func(tid string) {
+		t.Helper()
+		_, err := db.Exec(`INSERT INTO trips (id, driver_user_id, rider_user_id, status) VALUES (?1, 11, 20, ?2)`, tid, domain.TripStatusFinished)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	addFinished("a")
+	ga, na, ra, err := GrantTripFinishPromosAndReferral(ctx, db, 11, "a")
+	if err != nil || !ga || na != 1 || ra.Granted {
+		t.Fatalf("grant a: g=%v n=%v r=%+v err=%v", ga, na, ra, err)
+	}
+	addFinished("b")
+	gb, nb, rb, err := GrantTripFinishPromosAndReferral(ctx, db, 11, "b")
+	if err != nil || !gb || nb != 2 || rb.Granted {
+		t.Fatalf("grant b: g=%v n=%v r=%+v err=%v", gb, nb, rb, err)
+	}
+	addFinished("c")
+	g1, n1, r1, err := GrantTripFinishPromosAndReferral(ctx, db, 11, "c")
+	if err != nil || !g1 || n1 != 3 || !r1.Granted {
+		t.Fatalf("first grant c: g=%v n=%v r=%+v err=%v", g1, n1, r1, err)
+	}
+	var invPromo int
+	_ = db.QueryRow(`SELECT promo_balance FROM drivers WHERE user_id=10`).Scan(&invPromo)
+	if invPromo != int(ReferralRewardPromoSoM) {
+		t.Fatalf("inviter promo want %d got %d", ReferralRewardPromoSoM, invPromo)
+	}
+	var refPromo int
+	_ = db.QueryRow(`SELECT promo_balance FROM drivers WHERE user_id=11`).Scan(&refPromo)
+	wantRef := int(FirstThreeTripPromoSoM * 3)
+	if refPromo != wantRef {
+		t.Fatalf("referred promo want %d got %d", wantRef, refPromo)
+	}
+
+	g2, n2, r2, err := GrantTripFinishPromosAndReferral(ctx, db, 11, "c")
+	if err != nil {
+		t.Fatalf("second grant err=%v", err)
+	}
+	if g2 {
+		t.Fatalf("second first3 want noop got g=%v n=%v", g2, n2)
+	}
+	if r2.Granted || r2.Reason != ReferralRewardReasonAlreadyGranted {
+		t.Fatalf("second referral want already_granted got %+v", r2)
+	}
+	_ = db.QueryRow(`SELECT promo_balance FROM drivers WHERE user_id=10`).Scan(&invPromo)
+	if invPromo != int(ReferralRewardPromoSoM) {
+		t.Fatalf("inviter promo after retry want %d got %d", ReferralRewardPromoSoM, invPromo)
+	}
+	_ = db.QueryRow(`SELECT promo_balance FROM drivers WHERE user_id=11`).Scan(&refPromo)
+	if refPromo != wantRef {
+		t.Fatalf("referred promo after retry want %d got %d", wantRef, refPromo)
+	}
+	var ledgerRows int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM driver_ledger WHERE reference_type='first_3_trip_bonus'`).Scan(&ledgerRows)
+	if ledgerRows != 3 {
+		t.Fatalf("first3 ledger rows want 3 got %d", ledgerRows)
+	}
+	_ = db.QueryRow(`SELECT COUNT(*) FROM driver_ledger WHERE reference_type='referral_reward'`).Scan(&ledgerRows)
+	if ledgerRows != 1 {
+		t.Fatalf("referral ledger rows want 1 got %d", ledgerRows)
 	}
 }
 

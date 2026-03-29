@@ -88,13 +88,13 @@ func GetDriverPromoProgress(ctx context.Context, db *sql.DB, driverUserID int64)
 // FinishedTripCountAfterCompletingTrip returns how many trips the driver has with status FINISHED,
 // after the given trip row is already FINISHED. The current tripID must belong to the driver and be FINISHED
 // so the count includes it (call only after FinishTrip’s UPDATE commits, or inside the same transaction after UPDATE).
-func FinishedTripCountAfterCompletingTrip(ctx context.Context, db *sql.DB, driverUserID int64, tripID string) (int64, error) {
+func FinishedTripCountAfterCompletingTrip(ctx context.Context, q DBTX, driverUserID int64, tripID string) (int64, error) {
 	tid := strings.TrimSpace(tripID)
 	if tid == "" {
 		return 0, fmt.Errorf("finished trip id required")
 	}
 	var st string
-	err := db.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT status FROM trips WHERE id = ?1 AND driver_user_id = ?2`, tid, driverUserID).Scan(&st)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -106,7 +106,7 @@ func FinishedTripCountAfterCompletingTrip(ctx context.Context, db *sql.DB, drive
 		return 0, fmt.Errorf("trip %q not FINISHED (status=%s)", tid, st)
 	}
 	var n int64
-	err = db.QueryRowContext(ctx, `
+	err = q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM trips
 		WHERE driver_user_id = ?1 AND status = ?2`,
 		driverUserID, domain.TripStatusFinished).Scan(&n)
@@ -159,54 +159,27 @@ func TryGrantSignupPromoOnce(ctx context.Context, db *sql.DB, driverUserID int64
 const promoProgramKey = "program"
 const promoProgramID = "yettiqanot_driver_v2026"
 
-// TryGrantFirstThreeTripPromo grants +10_000 promo for finished-trip ordinals 1–3 only, once per trip_id
-// (unique driver_ledger driver_id + reference_id for first_3_trip_bonus). Count is always from
-// FinishedTripCountAfterCompletingTrip(ctx, db, driverUserID, tripID) — no external/cached count.
-func TryGrantFirstThreeTripPromo(ctx context.Context, db *sql.DB, driverUserID int64, tripID string) (granted bool, tripNum int, err error) {
+// grantFirstThreeTripPromoInTx grants first-3-trip promo using INSERT OR IGNORE + balance update (same tx).
+func grantFirstThreeTripPromoInTx(ctx context.Context, tx *sql.Tx, db *sql.DB, driverUserID int64, tripID string) (granted bool, tripNum int, err error) {
 	tripID = strings.TrimSpace(tripID)
 	if tripID == "" {
-		log.Printf("PROMO_SKIP driver=%d trip= reason=empty_trip_id", driverUserID)
-		return false, 0, nil
+		return false, 0, ErrEmptyTripID
 	}
-	finishedTripCount, err := FinishedTripCountAfterCompletingTrip(ctx, db, driverUserID, tripID)
+	finishedTripCount, err := FinishedTripCountAfterCompletingTrip(ctx, tx, driverUserID, tripID)
 	if err != nil {
-		log.Printf("PROMO_CHECK driver=%d trip=%s err=%v", driverUserID, tripID, err)
+		log.Printf("PROMO_CHECK driver_user_id=%d trip_id=%s computed_count=- err=%v", driverUserID, tripID, err)
 		return false, 0, err
 	}
-	log.Printf("PROMO_CHECK driver=%d trip=%s finished_trip_count=%d", driverUserID, tripID, finishedTripCount)
+	log.Printf("PROMO_CHECK driver_user_id=%d trip_id=%s computed_count=%d referral_user_id=%d", driverUserID, tripID, finishedTripCount, driverUserID)
 	if finishedTripCount > 3 {
-		log.Printf("PROMO_SKIP driver=%d trip=%s reason=after_first_three count=%d", driverUserID, tripID, finishedTripCount)
+		log.Printf("PROMO_SKIP driver_user_id=%d trip_id=%s computed_count=%d reason=after_first_three", driverUserID, tripID, finishedTripCount)
 		return false, 0, nil
 	}
 	if finishedTripCount < 1 {
-		log.Printf("PROMO_SKIP driver=%d trip=%s reason=invalid_count count=%d", driverUserID, tripID, finishedTripCount)
+		log.Printf("PROMO_SKIP driver_user_id=%d trip_id=%s computed_count=%d reason=invalid_count", driverUserID, tripID, finishedTripCount)
 		return false, 0, nil
 	}
 	tripNum = int(finishedTripCount)
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, tripNum, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var exists int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM driver_ledger
-		WHERE driver_id = ?1 AND reference_id = ?2 AND reference_type = ?3 AND entry_type = ?4`,
-		driverUserID, tripID, RefTypeFirst3TripBonus, models.LedgerEntryPromoGranted).Scan(&exists); err != nil {
-		return false, tripNum, err
-	}
-	if exists > 0 {
-		log.Printf("PROMO_SKIP driver=%d trip=%s reason=already_granted_ledger", driverUserID, tripID)
-		return false, tripNum, nil
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE drivers SET promo_balance = promo_balance + ?1, balance = balance + ?1 WHERE user_id = ?2`,
-		FirstThreeTripPromoSoM, driverUserID); err != nil {
-		return false, tripNum, err
-	}
 
 	meta, _ := json.Marshal(map[string]interface{}{
 		metaSourceKey:     "first_3_trip_bonus",
@@ -218,7 +191,7 @@ func TryGrantFirstThreeTripPromo(ctx context.Context, db *sql.DB, driverUserID i
 	refT := RefTypeFirst3TripBonus
 	tripCopy := tripID
 	ledger := repositories.NewDriverLedgerRepository(db)
-	if err := ledger.InsertTx(ctx, tx, &models.DriverLedgerEntry{
+	inserted, err := ledger.InsertTxOrIgnore(ctx, tx, &models.DriverLedgerEntry{
 		DriverID:      driverUserID,
 		Bucket:        models.LedgerBucketPromo,
 		EntryType:     models.LedgerEntryPromoGranted,
@@ -227,25 +200,43 @@ func TryGrantFirstThreeTripPromo(ctx context.Context, db *sql.DB, driverUserID i
 		ReferenceID:   &tripCopy,
 		Note:          &note,
 		MetadataJSON:  &metaStr,
-	}); err != nil {
-		if isUniqueConstraintErr(err) {
-			return false, tripNum, nil
-		}
+	})
+	if err != nil {
 		return false, tripNum, err
 	}
-	if err := tx.Commit(); err != nil {
+	if !inserted {
+		log.Printf("PROMO_SKIP driver_user_id=%d trip_id=%s computed_count=%d reason=insert_or_ignore_duplicate", driverUserID, tripID, finishedTripCount)
+		return false, 0, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE drivers SET promo_balance = promo_balance + ?1, balance = balance + ?1 WHERE user_id = ?2`,
+		FirstThreeTripPromoSoM, driverUserID); err != nil {
 		return false, tripNum, err
 	}
-	log.Printf("PROMO_GRANTED driver=%d trip=%s trip_num=%d amount=%d", driverUserID, tripID, tripNum, FirstThreeTripPromoSoM)
+	log.Printf("PROMO_GRANTED driver_user_id=%d trip_id=%s computed_count=%d trip_num=%d amount=%d", driverUserID, tripID, finishedTripCount, tripNum, FirstThreeTripPromoSoM)
 	return true, tripNum, nil
 }
 
-func isUniqueConstraintErr(err error) bool {
-	if err == nil {
-		return false
+// TryGrantFirstThreeTripPromo grants +10_000 promo for finished-trip ordinals 1–3 only, once per trip_id.
+// Uses its own transaction (for tests and isolated calls). FinishTrip uses GrantTripFinishPromosAndReferral instead.
+func TryGrantFirstThreeTripPromo(ctx context.Context, db *sql.DB, driverUserID int64, tripID string) (granted bool, tripNum int, err error) {
+	tripID = strings.TrimSpace(tripID)
+	if tripID == "" {
+		return false, 0, ErrEmptyTripID
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "unique constraint") || strings.Contains(s, "constraint failed")
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	g, n, err := grantFirstThreeTripPromoInTx(ctx, tx, db, driverUserID, tripID)
+	if err != nil {
+		return false, n, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, n, err
+	}
+	return g, n, nil
 }
 
 // FirstThreeTripBonusTelegramMessage returns trip-finish promo UX copy after a first-3-trip bonus grant (Uzbek).

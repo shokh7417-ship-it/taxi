@@ -414,17 +414,11 @@ func (s *TripService) FinishTrip(ctx context.Context, tripID string, driverUserI
 	firstThreeTripNum := 0
 	refRewardRes := accounting.ReferralRewardResult{}
 
-	// UpdateToFinished commits (autocommit). Promo/referral read FINISHED rows via FinishedTripCountAfterCompletingTrip(tripID).
-	// Order: first-3-trip promo → referral → commission.
-	if g, tn, err := accounting.TryGrantFirstThreeTripPromo(ctx, s.db, driverUserID, tripID); err != nil {
-		log.Printf("trip_service: first_3_trip promo (driver=%d trip=%s): %v", driverUserID, tripID, err)
-	} else {
-		firstThreeGranted, firstThreeTripNum = g, tn
-	}
-	var refErr error
-	refRewardRes, refErr = accounting.TryGrantReferralReward(ctx, s.db, driverUserID, tripID)
-	if refErr != nil {
-		log.Printf("trip_service: referral reward (referred=%d): %v", driverUserID, refErr)
+	// UpdateToFinished commits first; promo + referral share one transaction (idempotent ledger inserts).
+	var gErr error
+	firstThreeGranted, firstThreeTripNum, refRewardRes, gErr = accounting.GrantTripFinishPromosAndReferral(ctx, s.db, driverUserID, tripID)
+	if gErr != nil {
+		log.Printf("trip_service: promo/referral grants trip_id=%s driver_user_id=%d: %v", tripID, driverUserID, gErr)
 		refRewardRes = accounting.ReferralRewardResult{Reason: accounting.ReferralRewardReasonDBError}
 	}
 	// Internal commission accrual; offset against promo then cash wallet (see driver_ledger); not bank settlement.

@@ -51,6 +51,46 @@ func (r *DriverLedgerRepository) InsertTx(ctx context.Context, tx *sql.Tx, e *mo
 	return nil
 }
 
+// InsertTxOrIgnore inserts a ledger row; returns inserted=true if a new row was written.
+// Requires a UNIQUE constraint on (driver_id, reference_type, reference_id) for idempotent grants.
+func (r *DriverLedgerRepository) InsertTxOrIgnore(ctx context.Context, tx *sql.Tx, e *models.DriverLedgerEntry) (inserted bool, err error) {
+	var refType, refID, note, meta, exp interface{}
+	if e.ReferenceType != nil {
+		refType = *e.ReferenceType
+	}
+	if e.ReferenceID != nil {
+		refID = *e.ReferenceID
+	}
+	if e.Note != nil {
+		note = *e.Note
+	}
+	if e.MetadataJSON != nil {
+		meta = *e.MetadataJSON
+	}
+	if e.ExpiresAt != nil {
+		exp = *e.ExpiresAt
+	}
+	res, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO driver_ledger (driver_id, bucket, entry_type, amount, reference_type, reference_id, note, metadata_json, expires_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+		e.DriverID, e.Bucket, e.EntryType, e.Amount, refType, refID, note, meta, exp)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		id, err := res.LastInsertId()
+		if err == nil && id > 0 {
+			e.ID = id
+		}
+		e.CreatedAt = time.Now().UTC()
+	}
+	return n > 0, nil
+}
+
 // ListByDriver returns recent ledger rows for a driver (newest first).
 func (r *DriverLedgerRepository) ListByDriver(ctx context.Context, driverID int64, limit int) ([]models.DriverLedgerEntry, error) {
 	if limit <= 0 {
