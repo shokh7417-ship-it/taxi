@@ -102,6 +102,8 @@ func setupMarkArrivedTestDB(t *testing.T) *sql.DB {
 const (
 	testRiderText = "✅ Haydovchi sizning manzilingizga yetib keldi.\n\nSafar boshlashga tayyor: haydovchi bilan uchrashing. Haydovchi safarni boshlagach, yo‘l davom etadi."
 	testDriverText = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
+	testDriverTextCooldown = "Mijozga xabar allaqachon yuborilgan"
+	testDriverTextRetry     = "Mijozga xabar yetmadi, qayta urinib ko‘ring"
 )
 
 // pickLat/pickLng — driver same coords, fresh live location within 90s.
@@ -482,6 +484,86 @@ func TestMarkArrived_AlreadyArrivedNoop_CooldownSkipsSecondRiderSend(t *testing.
 	riderMsgs := riderBot.messagesTo(riderTg)
 	if len(riderMsgs) != 1 {
 		t.Fatalf("rider telegram count: got %d want 1 (cooldown blocks duplicate)", len(riderMsgs))
+	}
+	driverMsgs := driverBot.messagesTo(driverTg)
+	if len(driverMsgs) != 2 || driverMsgs[0] != testDriverText || driverMsgs[1] != testDriverTextCooldown {
+		t.Fatalf("driver messages: %q want first=%q second=%q", driverMsgs, testDriverText, testDriverTextCooldown)
+	}
+}
+
+func TestMarkArrived_RiderPrimaryFails_DriverGetsRetryMessage(t *testing.T) {
+	db := setupMarkArrivedTestDB(t)
+	defer db.Close()
+	tripID := "trip-rider-fail"
+	reqID := "req-rider-fail"
+	const driverID int64 = 10
+	const riderID int64 = 11
+	const riderTg int64 = 1001
+	const driverTg int64 = 2002
+	pickLat, pickLng := 40.23, 68.843
+	seedTripWaitingNearPickup(t, db, tripID, reqID, driverID, riderID, riderTg, driverTg, pickLat, pickLng, time.Now().UTC())
+
+	riderBot := &fakeTelegramBot{sendErr: fmt.Errorf("telegram unavailable")}
+	driverBot := &fakeTelegramBot{}
+	cfg := &config.Config{PickupStartMaxMeters: 500}
+	svc := NewTripService(db, repositories.NewTripRepo(db), riderBot, driverBot, cfg, nil, nil, nil)
+
+	out := captureLogOutput(t, func() {
+		if _, err := svc.MarkArrived(context.Background(), tripID, driverID); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !containsAll(out, "ARRIVED_NOTIFY_FAILED") {
+		t.Fatalf("expected ARRIVED_NOTIFY_FAILED in logs; got:\n%s", out)
+	}
+	if n := len(riderBot.messagesTo(riderTg)); n != 0 {
+		t.Fatalf("rider sends: got %d want 0", n)
+	}
+	dm := driverBot.messagesTo(driverTg)
+	if len(dm) != 1 || dm[0] != testDriverTextRetry {
+		t.Fatalf("driver message: %q want %q", dm, testDriverTextRetry)
+	}
+}
+
+func TestMarkArrived_PrimaryFailureClearsNotifiedAt_RetryNotBlockedByStaleCooldown(t *testing.T) {
+	db := setupMarkArrivedTestDB(t)
+	defer db.Close()
+	tripID := "trip-clear-cd"
+	reqID := "req-clear-cd"
+	const driverID int64 = 10
+	const riderID int64 = 11
+	const riderTg int64 = 1001
+	const driverTg int64 = 2002
+	pickLat, pickLng := 40.23, 68.843
+	seedTripArrivedNearPickup(t, db, tripID, reqID, driverID, riderID, riderTg, driverTg, pickLat, pickLng, time.Now().UTC())
+
+	if _, err := db.Exec(`UPDATE trips SET arrived_rider_notified_at = datetime('now', '-120 seconds') WHERE id = ?1`, tripID); err != nil {
+		t.Fatal(err)
+	}
+
+	failBot := &fakeTelegramBot{sendErr: fmt.Errorf("temporary")}
+	okBot := &fakeTelegramBot{}
+	driverBot := &fakeTelegramBot{}
+	cfg := &config.Config{PickupStartMaxMeters: 500}
+	svc := NewTripService(db, repositories.NewTripRepo(db), failBot, driverBot, cfg, nil, nil, nil)
+
+	if _, err := svc.MarkArrived(context.Background(), tripID, driverID); err != nil {
+		t.Fatal(err)
+	}
+	var ts sql.NullString
+	if err := db.QueryRow(`SELECT arrived_rider_notified_at FROM trips WHERE id = ?1`, tripID).Scan(&ts); err != nil {
+		t.Fatal(err)
+	}
+	if ts.Valid && ts.String != "" {
+		t.Fatalf("after primary failure expected arrived_rider_notified_at cleared, got %q", ts.String)
+	}
+
+	svc.riderBot = okBot
+	if _, err := svc.MarkArrived(context.Background(), tripID, driverID); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(okBot.messagesTo(riderTg)); n != 1 {
+		t.Fatalf("after clear, noop retry should send rider; got %d messages", n)
 	}
 }
 

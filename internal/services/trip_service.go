@@ -382,12 +382,16 @@ func telegramSendRiderArrivedMessage(tripID string, chatID int64, bot telegramBo
 
 func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, driverUserID, riderUserID int64) {
 	const riderText = "✅ Haydovchi sizning manzilingizga yetib keldi.\n\nSafar boshlashga tayyor: haydovchi bilan uchrashing. Haydovchi safarni boshlagach, yo‘l davom etadi."
-	const driverText = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
+	const driverTextSuccess = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
+	const driverTextCooldown = "Mijozga xabar allaqachon yuborilgan"
+	const driverTextRetry = "Mijozga xabar yetmadi, qayta urinib ko‘ring"
 
 	log.Printf("ARRIVED_NOTIFY_BEGIN trip_id=%s driver_user_id=%d rider_user_id=%d", tripID, driverUserID, riderUserID)
 
 	riderSent := false
 	driverSent := false
+	var riderSkippedCooldown bool
+	var riderFailureForDriverUX bool
 
 	// Rider notify: always enter this function from MarkArrived after ARRIVED commit; validate then call Send (never bypass API when eligible).
 	if riderUserID == 0 {
@@ -404,9 +408,11 @@ func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, 
 				log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s detail=%v", tripID, "rider_telegram_lookup_failed", err)
 			}
 			log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, err)
+			riderFailureForDriverUX = true
 		} else if riderTelegramID <= 0 {
 			log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s detail=user_id=%d telegram_id=%d", tripID, "invalid_rider_telegram_id", riderUserID, riderTelegramID)
 			log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, fmt.Errorf("rider telegram_id is zero or invalid (user_id=%d)", riderUserID))
+			riderFailureForDriverUX = true
 		} else {
 			skipRiderDueToCooldown := false
 			var lastNotified sql.NullString
@@ -414,10 +420,12 @@ func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, 
 				log.Printf("ARRIVED_NOTIFY_COOLDOWN_TS_QUERY trip_id=%s detail=%v", tripID, err)
 				lastNotified = sql.NullString{}
 			}
+			// Cooldown only when we have a persisted successful notify time (never block retries after a failed send — timestamp is cleared on primary failure).
 			if lastNotified.Valid && strings.TrimSpace(lastNotified.String) != "" {
 				if t, perr := parseDriverLiveAtUTC(lastNotified.String); perr == nil {
 					if ago := time.Since(t); ago < arrivedRiderNotifyCooldown {
 						skipRiderDueToCooldown = true
+						riderSkippedCooldown = true
 						rem := (arrivedRiderNotifyCooldown - ago).Seconds()
 						log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s detail=cooldown_remaining_sec=%.1f last=%s", tripID, "arrived_notify_cooldown", rem, lastNotified.String)
 					}
@@ -446,6 +454,10 @@ func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, 
 				}
 				if sendErr != nil {
 					log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, sendErr)
+					riderFailureForDriverUX = true
+					if _, clrErr := s.db.ExecContext(ctx, `UPDATE trips SET arrived_rider_notified_at = NULL WHERE id = ?1`, tripID); clrErr != nil {
+						log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, fmt.Errorf("clear arrived_rider_notified_at after primary failure: %w", clrErr))
+					}
 				} else {
 					riderSent = true
 					log.Printf("ARRIVED_NOTIFY_SENT trip_id=%s rider_id=%d telegram_message_id=%d", tripID, riderUserID, primaryResp.MessageID)
@@ -455,6 +467,14 @@ func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, 
 				}
 			}
 		}
+	}
+
+	driverMsgText := driverTextSuccess
+	switch {
+	case riderSkippedCooldown:
+		driverMsgText = driverTextCooldown
+	case riderFailureForDriverUX:
+		driverMsgText = driverTextRetry
 	}
 
 	if s.driverBot == nil {
@@ -487,7 +507,7 @@ func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, 
 			slog.Bool("driver_sent", driverSent))
 		return
 	}
-	if _, err := s.driverBot.Send(tgbotapi.NewMessage(driverTelegramID, driverText)); err != nil {
+	if _, err := s.driverBot.Send(tgbotapi.NewMessage(driverTelegramID, driverMsgText)); err != nil {
 		logger.ArrivedNotify("arrived_notify_driver_skipped", tripID,
 			slog.String("reason", "driver_send_failed"),
 			slog.Int64("driver_user_id", driverUserID),
