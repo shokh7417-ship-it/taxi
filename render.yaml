@@ -19,11 +19,11 @@ services:
         sync: false
 
   # Wake free-tier web service on a interval. Uses Python urllib (no curl); produces ~no stdout (avoids "Output too large").
-  # If you rename the web service, change the URL host to match https://<service-name>.onrender.com
+  # Must match your web service’s public URL (Dashboard → service → URL), not necessarily the `name:` field above.
   # Cron jobs may require a paid Render plan — if so, use an external pinger with the curl one-liner in README instead.
   - type: cron
     name: taxi-service-keepalive
     runtime: python
     schedule: "*/10 * * * *"
     buildCommand: "true"
-    startCommand: python -c "import urllib.request as u; r=u.urlopen('https://taxi-service.onrender.com/health'); assert r.getcode()==200"
+    startCommand: python -c "import urllib.request as u; r=u.urlopen('https://taxi-1-kpkh.onrender.com/health'); assert r.getcode()==200"
