@@ -86,8 +86,7 @@ func setupMarkArrivedTestDB(t *testing.T) *sql.DB {
 		driver_user_id INTEGER NOT NULL,
 		rider_user_id INTEGER NOT NULL,
 		status TEXT NOT NULL,
-		arrived_at TEXT,
-		arrived_rider_notified_at TEXT
+		arrived_at TEXT
 	);`)
 	exec(`CREATE TABLE drivers (
 		user_id INTEGER PRIMARY KEY,
@@ -101,9 +100,8 @@ func setupMarkArrivedTestDB(t *testing.T) *sql.DB {
 
 const (
 	testRiderText = "✅ Haydovchi sizning manzilingizga yetib keldi.\n\nSafar boshlashga tayyor: haydovchi bilan uchrashing. Haydovchi safarni boshlagach, yo‘l davom etadi."
-	testDriverText = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
-	testDriverTextCooldown = "Mijozga xabar allaqachon yuborilgan"
-	testDriverTextRetry     = "Mijozga xabar yetmadi, qayta urinib ko‘ring"
+	testDriverText  = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
+	testDriverTextRetry = "Mijozga xabar yetmadi, qayta urinib ko‘ring"
 )
 
 // pickLat/pickLng — driver same coords, fresh live location within 90s.
@@ -412,11 +410,11 @@ func TestMarkArrived_RiderNotifySkipped_InvalidTelegramID(t *testing.T) {
 	}
 }
 
-func TestMarkArrived_AlreadyArrivedNoop_SendsRiderAgainAfterCooldown(t *testing.T) {
+func TestMarkArrived_AlreadyArrivedNoop_SendsRiderOnPress(t *testing.T) {
 	db := setupMarkArrivedTestDB(t)
 	defer db.Close()
-	tripID := "trip-noop-cool"
-	reqID := "req-noop-cool"
+	tripID := "trip-noop-once"
+	reqID := "req-noop-once"
 	const driverID int64 = 10
 	const riderID int64 = 11
 	const riderTg int64 = 1001
@@ -429,9 +427,6 @@ func TestMarkArrived_AlreadyArrivedNoop_SendsRiderAgainAfterCooldown(t *testing.
 	cfg := &config.Config{PickupStartMaxMeters: 500}
 	svc := NewTripService(db, repositories.NewTripRepo(db), riderBot, driverBot, cfg, nil, nil, nil)
 
-	if _, err := db.Exec(`UPDATE trips SET arrived_rider_notified_at = datetime('now', '-120 seconds') WHERE id = ?1`, tripID); err != nil {
-		t.Fatal(err)
-	}
 	res, err := svc.MarkArrived(context.Background(), tripID, driverID)
 	if err != nil {
 		t.Fatalf("MarkArrived: %v", err)
@@ -445,7 +440,7 @@ func TestMarkArrived_AlreadyArrivedNoop_SendsRiderAgainAfterCooldown(t *testing.
 	}
 }
 
-func TestMarkArrived_AlreadyArrivedNoop_CooldownSkipsSecondRiderSend(t *testing.T) {
+func TestMarkArrived_AlreadyArrivedNoop_EachPressNotifiesRider(t *testing.T) {
 	db := setupMarkArrivedTestDB(t)
 	defer db.Close()
 	tripID := "trip-noop-spam"
@@ -468,8 +463,8 @@ func TestMarkArrived_AlreadyArrivedNoop_CooldownSkipsSecondRiderSend(t *testing.
 			t.Fatalf("first noop: err=%v res=%+v", err, res)
 		}
 	})
-	if !containsAll(out, "ARRIVED_NOTIFY_NOOP_RETRY", "ARRIVED_NOTIFY_SENT") {
-		t.Fatalf("expected noop retry + sent logs; got:\n%s", out)
+	if !containsAll(out, "ARRIVED_NOTIFY_ENTER", "ARRIVED_NOTIFY_SENT") {
+		t.Fatalf("expected ENTER + SENT logs; got:\n%s", out)
 	}
 
 	out2 := captureLogOutput(t, func() {
@@ -478,16 +473,21 @@ func TestMarkArrived_AlreadyArrivedNoop_CooldownSkipsSecondRiderSend(t *testing.
 			t.Fatalf("second noop: err=%v res=%+v", err, res)
 		}
 	})
-	if !containsAll(out2, "ARRIVED_NOTIFY_NOOP_RETRY", "ARRIVED_NOTIFY_SKIPPED", "arrived_notify_cooldown") {
-		t.Fatalf("expected cooldown skip; got:\n%s", out2)
+	if !containsAll(out2, "ARRIVED_NOTIFY_ENTER", "ARRIVED_NOTIFY_SENT") {
+		t.Fatalf("expected second ENTER + SENT; got:\n%s", out2)
 	}
 	riderMsgs := riderBot.messagesTo(riderTg)
-	if len(riderMsgs) != 1 {
-		t.Fatalf("rider telegram count: got %d want 1 (cooldown blocks duplicate)", len(riderMsgs))
+	if len(riderMsgs) != 2 {
+		t.Fatalf("rider telegram count: got %d want 2", len(riderMsgs))
+	}
+	for i, msg := range riderMsgs {
+		if msg != testRiderText {
+			t.Fatalf("rider msg %d: %q want %q", i, msg, testRiderText)
+		}
 	}
 	driverMsgs := driverBot.messagesTo(driverTg)
-	if len(driverMsgs) != 2 || driverMsgs[0] != testDriverText || driverMsgs[1] != testDriverTextCooldown {
-		t.Fatalf("driver messages: %q want first=%q second=%q", driverMsgs, testDriverText, testDriverTextCooldown)
+	if len(driverMsgs) != 2 || driverMsgs[0] != testDriverText || driverMsgs[1] != testDriverText {
+		t.Fatalf("driver messages: %q want two success texts", driverMsgs)
 	}
 }
 
@@ -522,48 +522,6 @@ func TestMarkArrived_RiderPrimaryFails_DriverGetsRetryMessage(t *testing.T) {
 	dm := driverBot.messagesTo(driverTg)
 	if len(dm) != 1 || dm[0] != testDriverTextRetry {
 		t.Fatalf("driver message: %q want %q", dm, testDriverTextRetry)
-	}
-}
-
-func TestMarkArrived_PrimaryFailureClearsNotifiedAt_RetryNotBlockedByStaleCooldown(t *testing.T) {
-	db := setupMarkArrivedTestDB(t)
-	defer db.Close()
-	tripID := "trip-clear-cd"
-	reqID := "req-clear-cd"
-	const driverID int64 = 10
-	const riderID int64 = 11
-	const riderTg int64 = 1001
-	const driverTg int64 = 2002
-	pickLat, pickLng := 40.23, 68.843
-	seedTripArrivedNearPickup(t, db, tripID, reqID, driverID, riderID, riderTg, driverTg, pickLat, pickLng, time.Now().UTC())
-
-	if _, err := db.Exec(`UPDATE trips SET arrived_rider_notified_at = datetime('now', '-120 seconds') WHERE id = ?1`, tripID); err != nil {
-		t.Fatal(err)
-	}
-
-	failBot := &fakeTelegramBot{sendErr: fmt.Errorf("temporary")}
-	okBot := &fakeTelegramBot{}
-	driverBot := &fakeTelegramBot{}
-	cfg := &config.Config{PickupStartMaxMeters: 500}
-	svc := NewTripService(db, repositories.NewTripRepo(db), failBot, driverBot, cfg, nil, nil, nil)
-
-	if _, err := svc.MarkArrived(context.Background(), tripID, driverID); err != nil {
-		t.Fatal(err)
-	}
-	var ts sql.NullString
-	if err := db.QueryRow(`SELECT arrived_rider_notified_at FROM trips WHERE id = ?1`, tripID).Scan(&ts); err != nil {
-		t.Fatal(err)
-	}
-	if ts.Valid && ts.String != "" {
-		t.Fatalf("after primary failure expected arrived_rider_notified_at cleared, got %q", ts.String)
-	}
-
-	svc.riderBot = okBot
-	if _, err := svc.MarkArrived(context.Background(), tripID, driverID); err != nil {
-		t.Fatal(err)
-	}
-	if n := len(okBot.messagesTo(riderTg)); n != 1 {
-		t.Fatalf("after clear, noop retry should send rider; got %d messages", n)
 	}
 }
 
