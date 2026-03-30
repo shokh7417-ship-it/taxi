@@ -30,6 +30,10 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 		start := time.Now()
 		path := c.Request.URL.Path
 		c.Next()
+		// Do not log health checks (cron/uptime monitors may hit frequently; keep stdout minimal).
+		if path == "/" || path == "/health" {
+			return
+		}
 		status := c.Writer.Status()
 		// Keep logs small: do not log query strings or request bodies.
 		log.Printf("http_request method=%s path=%s status=%d dur_ms=%d", c.Request.Method, path, status, time.Since(start).Milliseconds())
@@ -38,7 +42,7 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	healthHandler := func(c *gin.Context) {
 		// Keep health response extremely small and constant (external monitors rely on this).
 		// Do not touch DB, logs, or external services.
-		c.Data(200, "application/json; charset=utf-8", []byte(`{"status":"ok"}`))
+		c.Data(200, "text/plain; charset=utf-8", []byte("OK"))
 	}
 	r.GET("/health", healthHandler)
 	r.HEAD("/health", healthHandler)
