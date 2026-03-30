@@ -220,8 +220,63 @@ func TestMarkArrived_LogsArrivedNotifySummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	if !containsAll(out, "arrived_notify_summary", "arrived_notify_rider_sent", "arrived_notify_driver_sent") {
+	if !containsAll(out, "arrived_notify_summary", "arrived_notify_driver_sent") {
 		t.Fatalf("log output missing expected events; got:\n%s", out)
+	}
+}
+
+// flakyRiderBot fails Send for the first n attempts, then succeeds.
+type flakyRiderBot struct {
+	mu           sync.Mutex
+	failRemaining int
+	attempts      int
+	fakeTelegramBot
+}
+
+func (f *flakyRiderBot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+	f.mu.Lock()
+	f.attempts++
+	fail := f.failRemaining
+	if f.failRemaining > 0 {
+		f.failRemaining--
+	}
+	f.mu.Unlock()
+	if fail > 0 {
+		return tgbotapi.Message{}, fmt.Errorf("telegram temporary error")
+	}
+	return f.fakeTelegramBot.Send(c)
+}
+
+func TestMarkArrived_RiderNotifyRetriesThenSucceeds(t *testing.T) {
+	db := setupMarkArrivedTestDB(t)
+	defer db.Close()
+	tripID := "trip-retry"
+	reqID := "req-retry"
+	const driverID int64 = 10
+	const riderID int64 = 11
+	const riderTg int64 = 1001
+	const driverTg int64 = 2002
+	pickLat, pickLng := 40.23, 68.843
+	seedTripWaitingNearPickup(t, db, tripID, reqID, driverID, riderID, riderTg, driverTg, pickLat, pickLng, time.Now().UTC())
+
+	riderBot := &flakyRiderBot{failRemaining: 2}
+	driverBot := &fakeTelegramBot{}
+	cfg := &config.Config{PickupStartMaxMeters: 500}
+	svc := NewTripService(db, repositories.NewTripRepo(db), riderBot, driverBot, cfg, nil, nil, nil)
+
+	_, err := svc.MarkArrived(context.Background(), tripID, driverID)
+	if err != nil {
+		t.Fatalf("MarkArrived: %v", err)
+	}
+	riderBot.mu.Lock()
+	att := riderBot.attempts
+	riderBot.mu.Unlock()
+	if att != arrivedRiderNotifyMaxAttempts {
+		t.Fatalf("rider send attempts: got %d want %d", att, arrivedRiderNotifyMaxAttempts)
+	}
+	riderMsgs := riderBot.messagesTo(riderTg)
+	if len(riderMsgs) != 1 || riderMsgs[0] != testRiderText {
+		t.Fatalf("rider messages: %q want one with body %q", riderMsgs, testRiderText)
 	}
 }
 

@@ -311,6 +311,26 @@ func riderTripActiveReplyKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	return kb
 }
 
+// arrivedRiderNotifyMaxAttempts: first try + 2 retries (300ms between attempts).
+const (
+	arrivedRiderNotifyMaxAttempts = 3
+	arrivedRiderNotifyRetryDelay  = 300 * time.Millisecond
+)
+
+func telegramSendWithRetries(bot telegramBotAPI, msg tgbotapi.Chattable) error {
+	var lastErr error
+	for attempt := 0; attempt < arrivedRiderNotifyMaxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(arrivedRiderNotifyRetryDelay)
+		}
+		_, lastErr = bot.Send(msg)
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
+}
+
 func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, driverUserID, riderUserID int64) {
 	const riderText = "✅ Haydovchi sizning manzilingizga yetib keldi.\n\nSafar boshlashga tayyor: haydovchi bilan uchrashing. Haydovchi safarni boshlagach, yo‘l davom etadi."
 	const driverText = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
@@ -318,54 +338,50 @@ func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, 
 	riderSent := false
 	driverSent := false
 
+	// Rider notify: always run validation + send path; never fail silently.
 	if riderUserID == 0 {
-		logger.ArrivedNotify("arrived_notify_rider_skipped", tripID, slog.String("reason", "no_rider_user_id"))
+		log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "no_rider_user_id")
 	} else if s.riderBot == nil {
-		logger.ArrivedNotify("arrived_notify_rider_skipped", tripID,
-			slog.String("reason", "rider_bot_nil"),
-			slog.Int64("rider_user_id", riderUserID))
+		log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "rider_bot_nil")
 	} else {
 		var riderTelegramID int64
 		err := s.db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, riderUserID).Scan(&riderTelegramID)
 		if err != nil {
-			logger.ArrivedNotify("arrived_notify_rider_skipped", tripID,
-				slog.String("reason", "db_error"),
-				slog.Int64("rider_user_id", riderUserID),
-				slog.String("detail", err.Error()))
-		} else if riderTelegramID == 0 {
-			logger.ArrivedNotify("arrived_notify_rider_skipped", tripID,
-				slog.String("reason", "rider_telegram_id_missing"),
-				slog.Int64("rider_user_id", riderUserID))
+			if err == sql.ErrNoRows {
+				log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "rider_user_not_found")
+			} else {
+				log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "rider_telegram_lookup_failed")
+			}
+			log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, err)
+		} else if riderTelegramID <= 0 {
+			log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "invalid_rider_telegram_id")
+			log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, fmt.Errorf("rider telegram_id is zero or invalid (user_id=%d)", riderUserID))
 		} else {
-			var err error
+			// Private chat: Telegram chat_id equals the user’s numeric id.
+			chatID := riderTelegramID
+			var sendErr error
 			if s.cfg != nil && strings.TrimSpace(s.cfg.RiderMapURL) != "" {
 				riderMapURL := strings.TrimSuffix(s.cfg.RiderMapURL, "/") + "?trip_id=" + tripID
-				m1 := tgbotapi.NewMessage(riderTelegramID, riderText)
+				m1 := tgbotapi.NewMessage(chatID, riderText)
 				m1.ReplyMarkup = riderMapWebAppKeyboard("📍 Haydovchini kuzatish", riderMapURL)
-				_, err = s.riderBot.Send(m1)
-				if err == nil {
-					m2 := tgbotapi.NewMessage(riderTelegramID, "Haydovchini xaritada kuzating yoki safarni bekor qilishingiz mumkin.")
+				sendErr = telegramSendWithRetries(s.riderBot, m1)
+				if sendErr == nil {
+					m2 := tgbotapi.NewMessage(chatID, "Haydovchini xaritada kuzating yoki safarni bekor qilishingiz mumkin.")
 					m2.ReplyMarkup = riderTripActiveReplyKeyboard()
-					if _, err2 := s.riderBot.Send(m2); err2 != nil {
-						log.Printf("trip_service: arrived rider follow-up keyboard: %v", err2)
+					if err2 := telegramSendWithRetries(s.riderBot, m2); err2 != nil {
+						log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, fmt.Errorf("rider follow-up keyboard: %w", err2))
 					}
 				}
 			} else {
-				riderMsg := tgbotapi.NewMessage(riderTelegramID, riderText)
+				riderMsg := tgbotapi.NewMessage(chatID, riderText)
 				riderMsg.ReplyMarkup = riderTripActiveReplyKeyboard()
-				_, err = s.riderBot.Send(riderMsg)
+				sendErr = telegramSendWithRetries(s.riderBot, riderMsg)
 			}
-			if err != nil {
-				logger.ArrivedNotify("arrived_notify_rider_skipped", tripID,
-					slog.String("reason", "rider_send_failed"),
-					slog.Int64("rider_user_id", riderUserID),
-					slog.Int64("rider_telegram_id", riderTelegramID),
-					slog.String("detail", err.Error()))
+			if sendErr != nil {
+				log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, sendErr)
 			} else {
 				riderSent = true
-				logger.ArrivedNotify("arrived_notify_rider_sent", tripID,
-					slog.Int64("rider_user_id", riderUserID),
-					slog.Int64("rider_telegram_id", riderTelegramID))
+				log.Printf("ARRIVED_NOTIFY_SENT trip_id=%s rider_id=%d", tripID, riderUserID)
 			}
 		}
 	}
