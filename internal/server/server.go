@@ -2,6 +2,8 @@ package server
 
 import (
 	"database/sql"
+	"log"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -19,8 +21,19 @@ import (
 // riderBot is optional; used for rider referral link (bot username).
 func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc *services.MatchService, driverBot *tgbotapi.BotAPI, riderBot *tgbotapi.BotAPI, hub *ws.Hub, fareSvc *services.FareService) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.Default()
+	r := gin.New()
+	// Avoid gin's default access logger which may include full query strings
+	// (e.g. Telegram init_data on websocket requests), causing large stdout/stderr.
+	r.Use(gin.Recovery())
 	r.Use(corsMiddleware())
+	r.Use(func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+		c.Next()
+		status := c.Writer.Status()
+		// Keep logs small: do not log query strings or request bodies.
+		log.Printf("http_request method=%s path=%s status=%d dur_ms=%d", c.Request.Method, path, status, time.Since(start).Milliseconds())
+	})
 
 	healthHandler := func(c *gin.Context) {
 		// Keep health response extremely small and constant (external monitors rely on this).

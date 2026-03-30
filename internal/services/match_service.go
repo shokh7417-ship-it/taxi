@@ -27,7 +27,51 @@ const (
 	liveLocationActiveSeconds = 90
 	// DriverLocationFreshnessSeconds: only drivers with last_seen_at within this many seconds are eligible for dispatch.
 	driverLocationFreshnessSeconds = 90
+
+	// To prevent "output too large" issues, never log large slices verbatim.
+	logSliceMaxItems = 20
+	logMaxChars      = 180
 )
+
+func truncateLog(s string, maxChars int) string {
+	if maxChars <= 0 || len(s) <= maxChars {
+		return s
+	}
+	if maxChars < 4 {
+		return s[:maxChars]
+	}
+	return s[:maxChars-3] + "..."
+}
+
+func sampleInt64(ids []int64, maxItems int) string {
+	if len(ids) == 0 {
+		return "[]"
+	}
+	n := len(ids)
+	if maxItems > 0 && n > maxItems {
+		n = maxItems
+	}
+	base := fmt.Sprintf("%v", ids[:n])
+	if maxItems > 0 && len(ids) > n {
+		base += fmt.Sprintf("+%d_more", len(ids)-n)
+	}
+	return truncateLog(base, logMaxChars)
+}
+
+func sampleString(ss []string, maxItems int) string {
+	if len(ss) == 0 {
+		return "[]"
+	}
+	n := len(ss)
+	if maxItems > 0 && n > maxItems {
+		n = maxItems
+	}
+	base := "[" + strings.Join(ss[:n], ",") + "]"
+	if maxItems > 0 && len(ss) > n {
+		base += fmt.Sprintf("+%d_more", len(ss)-n)
+	}
+	return truncateLog(base, logMaxChars)
+}
 
 // formatOrderMessageToDriver builds the text sent to the driver for a new order (distance + client phone if available).
 func formatOrderMessageToDriver(distKm float64, riderPhone string) string {
@@ -115,7 +159,7 @@ func (s *MatchService) runPriorityDispatch(ctx context.Context, requestID string
 	// Grid prefilter: only look at drivers whose grid is in the 3x3 neighborhood of the pickup.
 	gridIDs := utils.NeighborGridIDs(pickupLat, pickupLng)
 	if s.cfg != nil && s.cfg.DispatchDebug {
-		log.Printf("dispatch_debug: request=%s pickup=(%.5f,%.5f) grids=%v", requestID, pickupLat, pickupLng, gridIDs)
+		log.Printf("dispatch_debug: request=%s pickup=(%.5f,%.5f) grids_count=%d grids=%v", requestID, pickupLat, pickupLng, len(gridIDs), gridIDs)
 	}
 	// Dispatch only for drivers with Telegram Live Location: live_location_active=1 and last_live_location_at within 90s.
 	locationFreshSinceStr := time.Now().Add(-time.Duration(driverLocationFreshnessSeconds) * time.Second).UTC().Format("2006-01-02 15:04:05")
@@ -187,9 +231,9 @@ func (s *MatchService) runPriorityDispatch(ctx context.Context, requestID string
 		for _, c := range candidates {
 			ids = append(ids, c.UserID)
 		}
-		log.Printf("dispatch_audit: request=%s candidate_drivers=%d driver_ids=%v", requestID, len(candidates), ids)
+		log.Printf("dispatch_audit: request=%s candidate_drivers=%d driver_ids_sample=%s", requestID, len(candidates), sampleInt64(ids, logSliceMaxItems))
 		if s.cfg != nil && s.cfg.DispatchDebug {
-			log.Printf("dispatch_debug: request=%s candidate_drivers=%d ids=%v", requestID, len(candidates), ids)
+			log.Printf("dispatch_debug: request=%s candidate_drivers=%d ids_sample=%s", requestID, len(candidates), sampleInt64(ids, logSliceMaxItems))
 		}
 	}
 	if len(candidates) == 0 {
@@ -284,7 +328,7 @@ func (s *MatchService) runPriorityDispatch(ctx context.Context, requestID string
 			_, _ = s.db.ExecContext(ctx, `UPDATE request_notifications SET status = ?1 WHERE request_id = ?2 AND driver_user_id = ?3`,
 				domain.NotificationStatusTimeout, requestID, driverID)
 		}
-		log.Printf("dispatch_audit: request=%s batch_timeout drivers=%v after=%ds next_batch", requestID, batchDriverIDs, batchWaitSec)
+		log.Printf("dispatch_audit: request=%s batch_timeout drivers_count=%d drivers_sample=%s after=%ds next_batch", requestID, len(batchDriverIDs), sampleInt64(batchDriverIDs, logSliceMaxItems), batchWaitSec)
 	}
 }
 
@@ -412,7 +456,7 @@ func (s *MatchService) NotifyDriverOfPendingRequests(ctx context.Context, driver
 		for _, it := range toSend {
 			reqIDs = append(reqIDs, it.requestID)
 		}
-		log.Printf("dispatch_debug: driver=%d candidate_requests=%d ids=%v", driverUserID, len(toSend), reqIDs)
+		log.Printf("dispatch_debug: driver=%d candidate_requests=%d req_ids_sample=%s", driverUserID, len(toSend), sampleString(reqIDs, logSliceMaxItems))
 	}
 	if err := rows.Err(); err != nil {
 		return
