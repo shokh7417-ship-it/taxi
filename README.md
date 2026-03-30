@@ -155,7 +155,11 @@ Driver routes use **`tryDriverID`** then **`RequireDriverAuth`** (Telegram initD
 | `GET` | `/legal/active` | `appUserAuth` (+ optional `X-Driver-Id`) |
 | `POST` | `/legal/accept` | Same |
 
-**Document sets:** **Drivers** see and accept **`driver_terms`** (haydovchi oferta) and **`privacy_policy`** only. **Riders** accept **`user_terms`** and **`privacy_policy`**. Dispatch and live-location gating for drivers require the **driver** pair at active versions (see **`internal/legal`**, **`SQLDriverDispatchLegalOK`**).
+**Document sets (split privacy):**
+- **Drivers** see and accept **`driver_terms`** (haydovchi oferta) + **`privacy_policy_driver`**
+- **Riders** see and accept **`user_terms`** + **`privacy_policy_user`**
+
+Dispatch and driver live-location gating require the **driver** pair at active versions (see **`internal/legal`**, **`SQLDriverDispatchLegalOK`**).
 
 CORS (see **`server.go`**): allows `X-Telegram-Init-Data`, `X-Driver-Id`. Full auth behavior: **`docs/AUTH.md`**.
 
@@ -292,8 +296,12 @@ Admin routes (drivers, riders, payments, verification) are registered from **`ha
 
 ### Driver vs rider legal acceptance
 
-- **Drivers:** **`driver_terms`** + **`privacy_policy`** at active versions (Telegram oferta prompt, Mini App **`/legal/*`**, dispatch SQL). **`user_terms`** are **not** required for drivers.
-- **Riders:** **`user_terms`** + **`privacy_policy`**.
+- **Drivers:** **`driver_terms`** + **`privacy_policy_driver`** at active versions (Telegram oferta prompt, Mini App **`/legal/*`**, dispatch SQL). **`user_terms`** are **not** required for drivers.
+- **Riders:** **`user_terms`** + **`privacy_policy_user`**.
+
+### Migration notes (SQLite / goose)
+
+- Some migrations (e.g. **`048_split_privacy_policy_user_driver.sql`**) rebuild tables to extend SQLite `CHECK` constraints. Those are marked **`-- +goose NO TRANSACTION`** because SQLite does **not** allow starting a transaction inside an existing one (nested `BEGIN`), and goose normally wraps migrations in a transaction by default.
 
 ### Telegram Bot API (message length)
 
