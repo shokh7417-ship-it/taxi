@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"sync"
 	"testing"
@@ -107,6 +108,32 @@ func seedTripWaitingNearPickup(t *testing.T, db *sql.DB, tripID, reqID string, d
 	t.Helper()
 	_, err := db.Exec(`INSERT INTO users (id, telegram_id) VALUES (?1, ?2), (?3, ?4)`,
 		riderID, riderTg, driverID, driverTg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO ride_requests (id, pickup_lat, pickup_lng) VALUES (?1, ?2, ?3)`, reqID, pickLat, pickLng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO trips (id, request_id, driver_user_id, rider_user_id, status) VALUES (?1, ?2, ?3, ?4, ?5)`,
+		tripID, reqID, driverID, riderID, domain.TripStatusWaiting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveStr := liveAt.UTC().Format("2006-01-02 15:04:05")
+	_, err = db.Exec(`INSERT INTO drivers (user_id, last_lat, last_lng, last_live_location_at, live_location_active) VALUES (?1, ?2, ?3, ?4, 1)`,
+		driverID, pickLat, pickLng, liveStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedTripWaitingNearPickupZeroRider: trip with rider_user_id = 0 (no passenger user linked).
+func seedTripWaitingNearPickupZeroRider(t *testing.T, db *sql.DB, tripID, reqID string, driverID, riderTg, driverTg int64, pickLat, pickLng float64, liveAt time.Time) {
+	t.Helper()
+	const riderID int64 = 0
+	_, err := db.Exec(`INSERT INTO users (id, telegram_id) VALUES (?1, ?2), (?3, ?4)`,
+		driverID, driverTg, int64(99), riderTg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +272,116 @@ func (f *flakyRiderBot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 		return tgbotapi.Message{}, fmt.Errorf("telegram temporary error")
 	}
 	return f.fakeTelegramBot.Send(c)
+}
+
+func captureLogOutput(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(orig)
+	fn()
+	return buf.String()
+}
+
+func TestMarkArrived_RiderNotifySkipped_NoRiderUserID(t *testing.T) {
+	db := setupMarkArrivedTestDB(t)
+	defer db.Close()
+	tripID := "trip-no-rider"
+	reqID := "req-no-rider"
+	constDriverID := int64(10)
+	riderTg, driverTg := int64(1001), int64(2002)
+	pickLat, pickLng := 40.23, 68.843
+	seedTripWaitingNearPickupZeroRider(t, db, tripID, reqID, constDriverID, riderTg, driverTg, pickLat, pickLng, time.Now().UTC())
+
+	riderBot := &fakeTelegramBot{}
+	driverBot := &fakeTelegramBot{}
+	cfg := &config.Config{PickupStartMaxMeters: 500}
+	svc := NewTripService(db, repositories.NewTripRepo(db), riderBot, driverBot, cfg, nil, nil, nil)
+
+	out := captureLogOutput(t, func() {
+		if _, err := svc.MarkArrived(context.Background(), tripID, constDriverID); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !containsAll(out, "ARRIVED_NOTIFY_ENTER", "ARRIVED_NOTIFY_BEGIN", "ARRIVED_NOTIFY_SKIPPED", "no_rider_user_id") {
+		t.Fatalf("expected skip logs; got:\n%s", out)
+	}
+	if len(riderBot.sent) != 0 {
+		t.Fatalf("rider bot should not send when rider_user_id=0; got %d", len(riderBot.sent))
+	}
+}
+
+func TestMarkArrived_RiderNotifySkipped_NilRiderBot(t *testing.T) {
+	db := setupMarkArrivedTestDB(t)
+	defer db.Close()
+	tripID := "trip-nil-bot"
+	reqID := "req-nil-bot"
+	const driverID int64 = 10
+	const riderID int64 = 11
+	riderTg, driverTg := int64(1001), int64(2002)
+	pickLat, pickLng := 40.23, 68.843
+	seedTripWaitingNearPickup(t, db, tripID, reqID, driverID, riderID, riderTg, driverTg, pickLat, pickLng, time.Now().UTC())
+
+	driverBot := &fakeTelegramBot{}
+	cfg := &config.Config{PickupStartMaxMeters: 500}
+	svc := NewTripService(db, repositories.NewTripRepo(db), nil, driverBot, cfg, nil, nil, nil)
+
+	out := captureLogOutput(t, func() {
+		if _, err := svc.MarkArrived(context.Background(), tripID, driverID); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !containsAll(out, "ARRIVED_NOTIFY_ENTER", "ARRIVED_NOTIFY_BEGIN", "ARRIVED_NOTIFY_SKIPPED", "rider_bot_nil") {
+		t.Fatalf("expected skip logs; got:\n%s", out)
+	}
+}
+
+func TestMarkArrived_RiderNotifySkipped_InvalidTelegramID(t *testing.T) {
+	db := setupMarkArrivedTestDB(t)
+	defer db.Close()
+	tripID := "trip-bad-tg"
+	reqID := "req-bad-tg"
+	const driverID int64 = 10
+	const riderID int64 = 11
+	// rider telegram_id 0
+	pickLat, pickLng := 40.23, 68.843
+	_, err := db.Exec(`INSERT INTO users (id, telegram_id) VALUES (?1, ?2), (?3, ?4)`, riderID, 0, driverID, 2002)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO ride_requests (id, pickup_lat, pickup_lng) VALUES (?1, ?2, ?3)`, reqID, pickLat, pickLng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO trips (id, request_id, driver_user_id, rider_user_id, status) VALUES (?1, ?2, ?3, ?4, ?5)`,
+		tripID, reqID, driverID, riderID, domain.TripStatusWaiting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveStr := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err = db.Exec(`INSERT INTO drivers (user_id, last_lat, last_lng, last_live_location_at, live_location_active) VALUES (?1, ?2, ?3, ?4, 1)`,
+		driverID, pickLat, pickLng, liveStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	riderBot := &fakeTelegramBot{}
+	driverBot := &fakeTelegramBot{}
+	cfg := &config.Config{PickupStartMaxMeters: 500}
+	svc := NewTripService(db, repositories.NewTripRepo(db), riderBot, driverBot, cfg, nil, nil, nil)
+
+	out := captureLogOutput(t, func() {
+		if _, err := svc.MarkArrived(context.Background(), tripID, driverID); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !containsAll(out, "ARRIVED_NOTIFY_SKIPPED", "invalid_rider_telegram_id") {
+		t.Fatalf("expected invalid telegram skip; got:\n%s", out)
+	}
+	if len(riderBot.sent) != 0 {
+		t.Fatal("no Telegram send when telegram_id invalid")
+	}
 }
 
 func TestMarkArrived_RiderNotifyRetriesThenSucceeds(t *testing.T) {

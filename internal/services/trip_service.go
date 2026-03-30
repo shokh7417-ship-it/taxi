@@ -284,7 +284,12 @@ func (s *TripService) MarkArrived(ctx context.Context, tripID string, driverUser
 		return nil, domain.ErrInvalidTransition
 	}
 	var riderUserID int64
-	_ = s.db.QueryRowContext(ctx, `SELECT rider_user_id FROM trips WHERE id = ?1`, tripID).Scan(&riderUserID)
+	if err := s.db.QueryRowContext(ctx, `SELECT rider_user_id FROM trips WHERE id = ?1`, tripID).Scan(&riderUserID); err != nil {
+		log.Printf("ARRIVED_NOTIFY_ENTER trip_id=%s driver_user_id=%d rider_user_id=0 trip_lookup_error=%v", tripID, driverUserID, err)
+		riderUserID = 0
+	} else {
+		log.Printf("ARRIVED_NOTIFY_ENTER trip_id=%s driver_user_id=%d rider_user_id=%d", tripID, driverUserID, riderUserID)
+	}
 	s.notifyArrivedAtPickup(ctx, tripID, driverUserID, riderUserID)
 	if s.hub != nil {
 		s.hub.BroadcastToTrip(tripID, ws.Event{
@@ -317,71 +322,80 @@ const (
 	arrivedRiderNotifyRetryDelay  = 300 * time.Millisecond
 )
 
-func telegramSendWithRetries(bot telegramBotAPI, msg tgbotapi.Chattable) error {
+// telegramSendRiderArrivedMessage calls Telegram Bot API Send up to arrivedRiderNotifyMaxAttempts times.
+// Logs each ATTEMPT; on success logs TELEGRAM_OK with message_id (confirmed API response). Returns last error if all fail.
+func telegramSendRiderArrivedMessage(tripID string, chatID int64, bot telegramBotAPI, msg tgbotapi.Chattable) (tgbotapi.Message, error) {
 	var lastErr error
-	for attempt := 0; attempt < arrivedRiderNotifyMaxAttempts; attempt++ {
-		if attempt > 0 {
+	var zero tgbotapi.Message
+	for attempt := 1; attempt <= arrivedRiderNotifyMaxAttempts; attempt++ {
+		if attempt > 1 {
 			time.Sleep(arrivedRiderNotifyRetryDelay)
 		}
-		_, lastErr = bot.Send(msg)
-		if lastErr == nil {
-			return nil
+		log.Printf("ARRIVED_NOTIFY_RIDER_TELEGRAM_ATTEMPT trip_id=%s chat_id=%d attempt=%d/%d", tripID, chatID, attempt, arrivedRiderNotifyMaxAttempts)
+		resp, err := bot.Send(msg)
+		if err == nil {
+			log.Printf("ARRIVED_NOTIFY_RIDER_TELEGRAM_OK trip_id=%s chat_id=%d message_id=%d attempt=%d", tripID, chatID, resp.MessageID, attempt)
+			return resp, nil
 		}
+		lastErr = err
+		log.Printf("ARRIVED_NOTIFY_RIDER_TELEGRAM_ERROR trip_id=%s chat_id=%d attempt=%d error=%v", tripID, chatID, attempt, err)
 	}
-	return lastErr
+	return zero, lastErr
 }
 
 func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, driverUserID, riderUserID int64) {
 	const riderText = "✅ Haydovchi sizning manzilingizga yetib keldi.\n\nSafar boshlashga tayyor: haydovchi bilan uchrashing. Haydovchi safarni boshlagach, yo‘l davom etadi."
 	const driverText = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
 
+	log.Printf("ARRIVED_NOTIFY_BEGIN trip_id=%s driver_user_id=%d rider_user_id=%d", tripID, driverUserID, riderUserID)
+
 	riderSent := false
 	driverSent := false
 
-	// Rider notify: always run validation + send path; never fail silently.
+	// Rider notify: always enter this function from MarkArrived after ARRIVED commit; validate then call Send (never bypass API when eligible).
 	if riderUserID == 0 {
-		log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "no_rider_user_id")
+		log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s detail=%s", tripID, "no_rider_user_id", "trips.rider_user_id is zero or missing")
 	} else if s.riderBot == nil {
-		log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "rider_bot_nil")
+		log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s detail=%s", tripID, "rider_bot_nil", "TripService.riderBot not configured")
 	} else {
 		var riderTelegramID int64
 		err := s.db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, riderUserID).Scan(&riderTelegramID)
 		if err != nil {
 			if err == sql.ErrNoRows {
-				log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "rider_user_not_found")
+				log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s detail=%s", tripID, "rider_user_not_found", "no users row for rider_user_id")
 			} else {
-				log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "rider_telegram_lookup_failed")
+				log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s detail=%v", tripID, "rider_telegram_lookup_failed", err)
 			}
 			log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, err)
 		} else if riderTelegramID <= 0 {
-			log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s", tripID, "invalid_rider_telegram_id")
+			log.Printf("ARRIVED_NOTIFY_SKIPPED trip_id=%s reason=%s detail=user_id=%d telegram_id=%d", tripID, "invalid_rider_telegram_id", riderUserID, riderTelegramID)
 			log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, fmt.Errorf("rider telegram_id is zero or invalid (user_id=%d)", riderUserID))
 		} else {
-			// Private chat: Telegram chat_id equals the user’s numeric id.
 			chatID := riderTelegramID
+			var primaryResp tgbotapi.Message
 			var sendErr error
 			if s.cfg != nil && strings.TrimSpace(s.cfg.RiderMapURL) != "" {
 				riderMapURL := strings.TrimSuffix(s.cfg.RiderMapURL, "/") + "?trip_id=" + tripID
 				m1 := tgbotapi.NewMessage(chatID, riderText)
 				m1.ReplyMarkup = riderMapWebAppKeyboard("📍 Haydovchini kuzatish", riderMapURL)
-				sendErr = telegramSendWithRetries(s.riderBot, m1)
+				primaryResp, sendErr = telegramSendRiderArrivedMessage(tripID, chatID, s.riderBot, m1)
 				if sendErr == nil {
 					m2 := tgbotapi.NewMessage(chatID, "Haydovchini xaritada kuzating yoki safarni bekor qilishingiz mumkin.")
 					m2.ReplyMarkup = riderTripActiveReplyKeyboard()
-					if err2 := telegramSendWithRetries(s.riderBot, m2); err2 != nil {
-						log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, fmt.Errorf("rider follow-up keyboard: %w", err2))
+					if _, err2 := telegramSendRiderArrivedMessage(tripID, chatID, s.riderBot, m2); err2 != nil {
+						log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, fmt.Errorf("rider follow-up keyboard after primary message_id=%d: %w", primaryResp.MessageID, err2))
 					}
 				}
 			} else {
 				riderMsg := tgbotapi.NewMessage(chatID, riderText)
 				riderMsg.ReplyMarkup = riderTripActiveReplyKeyboard()
-				sendErr = telegramSendWithRetries(s.riderBot, riderMsg)
+				primaryResp, sendErr = telegramSendRiderArrivedMessage(tripID, chatID, s.riderBot, riderMsg)
 			}
 			if sendErr != nil {
 				log.Printf("ARRIVED_NOTIFY_FAILED trip_id=%s error=%v", tripID, sendErr)
 			} else {
 				riderSent = true
-				log.Printf("ARRIVED_NOTIFY_SENT trip_id=%s rider_id=%d", tripID, riderUserID)
+				log.Printf("ARRIVED_NOTIFY_SENT trip_id=%s rider_id=%d telegram_message_id=%d", tripID, riderUserID, primaryResp.MessageID)
 			}
 		}
 	}
