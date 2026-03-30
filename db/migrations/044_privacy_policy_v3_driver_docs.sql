@@ -13,8 +13,8 @@ YettiQanot foydalanuvchi ma’lumotlarini xizmatni ta’minlash uchun qayta ishl
 - Telegram ID
 - joylashuv (location)
 - buyurtma ma’lumotlari
-- haydovchilar uchun: haydovchilik guvohnomasi bo‘yicha ma’lumotlar (jumladan, surat yoki skan-nusxa orqali taqdim etilishi mumkin)
-- haydovchilar uchun: transport vositasi texnik pasporti bo‘yicha ma’lumotlar (jumladan, surat yoki skan-nusxa orqali taqdim etilishi mumkin)
+- haydovchilik guvohnomasi bo‘yicha ma’lumotlar (jumladan, surat yoki skan-nusxa orqali taqdim etilishi mumkin)
+- transport vositasi texnik pasporti bo‘yicha ma’lumotlar (jumladan, surat yoki skan-nusxa orqali taqdim etilishi mumkin)
 
 2. Maqsad:
 - haydovchi va mijozni bog‘lash
