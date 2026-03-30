@@ -22,7 +22,11 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	r := gin.Default()
 	r.Use(corsMiddleware())
 
-	healthHandler := func(c *gin.Context) { c.String(200, "ok") }
+	healthHandler := func(c *gin.Context) {
+		// Keep health response extremely small and constant (external monitors rely on this).
+		// Do not touch DB, logs, or external services.
+		c.Data(200, "application/json; charset=utf-8", []byte(`{"status":"ok"}`))
+	}
 	r.GET("/health", healthHandler)
 	r.HEAD("/health", healthHandler)
 	r.GET("/", healthHandler)
