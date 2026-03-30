@@ -98,7 +98,7 @@ func setupMarkArrivedTestDB(t *testing.T) *sql.DB {
 }
 
 const (
-	testRiderText  = "Haydovchi sizning manzilingizga yetib keldi."
+	testRiderText = "✅ Haydovchi sizning manzilingizga yetib keldi.\n\nSafar boshlashga tayyor: haydovchi bilan uchrashing. Haydovchi safarni boshlagach, yo‘l davom etadi."
 	testDriverText = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
 )
 

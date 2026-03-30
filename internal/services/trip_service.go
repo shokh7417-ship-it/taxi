@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -298,8 +299,20 @@ func (s *TripService) MarkArrived(ctx context.Context, tripID string, driverUser
 	return &TripActionResult{Result: "updated", Status: domain.TripStatusArrived}, nil
 }
 
+// riderTripActiveReplyKeyboard matches assignment flow: track map + cancel during WAITING/ARRIVED/STARTED.
+func riderTripActiveReplyKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	kb := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📍 Haydovchini kuzatish"),
+			tgbotapi.NewKeyboardButton("❌ Bekor qilish"),
+		),
+	)
+	kb.ResizeKeyboard = true
+	return kb
+}
+
 func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, driverUserID, riderUserID int64) {
-	const riderText = "Haydovchi sizning manzilingizga yetib keldi."
+	const riderText = "✅ Haydovchi sizning manzilingizga yetib keldi.\n\nSafar boshlashga tayyor: haydovchi bilan uchrashing. Haydovchi safarni boshlagach, yo‘l davom etadi."
 	const driverText = "✅ Mijozga yetib keldingiz. Yo‘lovchiga xabar yuborildi. Safarni boshlashingiz mumkin."
 
 	riderSent := false
@@ -324,7 +337,25 @@ func (s *TripService) notifyArrivedAtPickup(ctx context.Context, tripID string, 
 				slog.String("reason", "rider_telegram_id_missing"),
 				slog.Int64("rider_user_id", riderUserID))
 		} else {
-			if _, err := s.riderBot.Send(tgbotapi.NewMessage(riderTelegramID, riderText)); err != nil {
+			var err error
+			if s.cfg != nil && strings.TrimSpace(s.cfg.RiderMapURL) != "" {
+				riderMapURL := strings.TrimSuffix(s.cfg.RiderMapURL, "/") + "?trip_id=" + tripID
+				m1 := tgbotapi.NewMessage(riderTelegramID, riderText)
+				m1.ReplyMarkup = riderMapWebAppKeyboard("📍 Haydovchini kuzatish", riderMapURL)
+				_, err = s.riderBot.Send(m1)
+				if err == nil {
+					m2 := tgbotapi.NewMessage(riderTelegramID, "Haydovchini xaritada kuzating yoki safarni bekor qilishingiz mumkin.")
+					m2.ReplyMarkup = riderTripActiveReplyKeyboard()
+					if _, err2 := s.riderBot.Send(m2); err2 != nil {
+						log.Printf("trip_service: arrived rider follow-up keyboard: %v", err2)
+					}
+				}
+			} else {
+				riderMsg := tgbotapi.NewMessage(riderTelegramID, riderText)
+				riderMsg.ReplyMarkup = riderTripActiveReplyKeyboard()
+				_, err = s.riderBot.Send(riderMsg)
+			}
+			if err != nil {
 				logger.ArrivedNotify("arrived_notify_rider_skipped", tripID,
 					slog.String("reason", "rider_send_failed"),
 					slog.Int64("rider_user_id", riderUserID),
