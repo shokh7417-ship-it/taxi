@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -171,11 +172,28 @@ func (h *AdminHandlers) AdjustBalance(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "admin_id must be > 0"})
 		return
 	}
-	if err := h.svc.AdjustDriverBalance(c.Request.Context(), driverID, req.Amount, req.Reason, req.AdminID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to adjust balance"})
+	promo, cash, total, isActive, err := h.svc.AdjustDriverBalance(c.Request.Context(), driverID, req.Amount, req.Reason, req.AdminID)
+	if err != nil {
+		// Business-rule / not-found mapping.
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "driver not found"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.Status(http.StatusNoContent)
+	c.JSON(http.StatusOK, gin.H{
+		"success":            true,
+		"driver_id":          driverID,
+		"delta":              req.Amount,
+		"promo_balance":      promo,
+		"cash_balance":       cash,
+		"balance":            total,
+		"is_active":          isActive,
+		"ledger_entry_type":  "MANUAL_ADJUSTMENT",
+		"reason":             req.Reason,
+		"admin_id":           req.AdminID,
+	})
 }
 
 // ListPayments returns payment history, optionally filtered by driver_id query param.

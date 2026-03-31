@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"strconv"
 	"time"
@@ -128,13 +129,14 @@ func (s *AdminService) AddDriverBalance(ctx context.Context, driverID int64, amo
 
 // AdjustDriverBalance applies a signed manual delta to the driver's cash wallet and total balance, and records an audit ledger entry.
 // Does not create a payments row (admin-side correction only).
-func (s *AdminService) AdjustDriverBalance(ctx context.Context, driverID int64, delta int64, reason string, adminID int64) error {
+// Returns final balances and is_active flag after adjustment.
+func (s *AdminService) AdjustDriverBalance(ctx context.Context, driverID int64, delta int64, reason string, adminID int64) (promoBalance, cashBalance, totalBalance int64, isActive int, err error) {
 	if delta == 0 || s.db == nil {
-		return nil
+		return 0, 0, 0, 0, fmt.Errorf("amount must be non-zero")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, 0, 0, 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -142,11 +144,11 @@ func (s *AdminService) AdjustDriverBalance(ctx context.Context, driverID int64, 
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(promo_balance, 0), COALESCE(cash_balance, 0), COALESCE(balance, 0)
 		FROM drivers WHERE user_id = ?1`, driverID).Scan(&promo, &cash, &total); err != nil {
-		return err
+		return 0, 0, 0, 0, err
 	}
 	newTotal := total + delta
 	if newTotal < promo {
-		return sql.ErrNoRows
+		return 0, 0, 0, 0, fmt.Errorf("new total balance (%d) cannot be less than promo_balance (%d)", newTotal, promo)
 	}
 	newCash := newTotal - promo
 	if _, err := tx.ExecContext(ctx, `
@@ -154,7 +156,7 @@ func (s *AdminService) AdjustDriverBalance(ctx context.Context, driverID int64, 
 		  is_active = CASE WHEN ?2 <= 0 THEN 0 ELSE is_active END
 		WHERE user_id = ?3`,
 		newCash, newTotal, driverID); err != nil {
-		return err
+		return 0, 0, 0, 0, err
 	}
 
 	ledger := repositories.NewDriverLedgerRepository(s.db)
@@ -174,9 +176,22 @@ func (s *AdminService) AdjustDriverBalance(ctx context.Context, driverID int64, 
 		Note:          &note,
 	}
 	if err := ledger.InsertTx(ctx, tx, e); err != nil {
-		return err
+		return 0, 0, 0, 0, err
 	}
-	return tx.Commit()
+
+	// Read back final balances and is_active for response.
+	var promoFinal, cashFinal, totalFinal int64
+	var isActiveFinal int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(promo_balance,0), COALESCE(cash_balance,0), COALESCE(balance,0), COALESCE(is_active,0)
+		FROM drivers WHERE user_id = ?1`, driverID).Scan(&promoFinal, &cashFinal, &totalFinal, &isActiveFinal); err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return promoFinal, cashFinal, totalFinal, isActiveFinal, nil
 }
 
 // ListPayments returns payment history, optionally filtered by driver.
