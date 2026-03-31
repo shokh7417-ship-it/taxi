@@ -86,7 +86,7 @@ type deductBalanceRequest struct {
 
 // deductBalanceJSON is used to accept amount as either number or string in JSON.
 type deductBalanceJSON struct {
-	Amount json.Number `json:"amount"`
+	Amount interface{} `json:"amount"`
 	Reason string      `json:"reason"`
 }
 
@@ -233,18 +233,32 @@ func (h *AdminHandlers) DeductBalance(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 			return
 		}
-		if j.Amount == "" {
+		switch v := j.Amount.(type) {
+		case float64:
+			req.Amount = int64(v)
+		case string:
+			v = strings.TrimSpace(v)
+			if v == "" {
+				log.Printf("admin_deduct_balance: missing amount in JSON driver_id=%d", driverID)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be greater than zero"})
+				return
+			}
+			amt, perr := strconv.ParseInt(v, 10, 64)
+			if perr != nil {
+				log.Printf("admin_deduct_balance: parse amount failed driver_id=%d raw=%q err=%v", driverID, v, perr)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be a valid integer"})
+				return
+			}
+			req.Amount = amt
+		case nil:
 			log.Printf("admin_deduct_balance: missing amount in JSON driver_id=%d", driverID)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be greater than zero"})
 			return
-		}
-		amt, perr := j.Amount.Int64()
-		if perr != nil {
-			log.Printf("admin_deduct_balance: parse amount failed driver_id=%d raw=%q err=%v", driverID, string(j.Amount), perr)
+		default:
+			log.Printf("admin_deduct_balance: unsupported amount type driver_id=%d type=%T", driverID, v)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be a valid integer"})
 			return
 		}
-		req.Amount = amt
 		req.Reason = j.Reason
 	} else {
 		if err := c.ShouldBind(&req); err != nil {
