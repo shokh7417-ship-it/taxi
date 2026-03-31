@@ -12,6 +12,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/google/uuid"
+	"taxi-mvp/internal/abuse"
 	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/domain"
 	"taxi-mvp/internal/legal"
@@ -559,7 +560,8 @@ func handleLocation(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 		return
 	}
 	var userID int64
-	err := db.QueryRowContext(context.Background(),
+	ctx := context.Background()
+	err := db.QueryRowContext(ctx,
 		`SELECT id FROM users WHERE telegram_id = ?1`, telegramID).Scan(&userID)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -568,6 +570,17 @@ func handleLocation(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 		}
 		log.Printf("rider: get user: %v", err)
 		send(bot, chatID, "Xatolik. Qayta urinib ko'ring.")
+		return
+	}
+
+	// Anti-abuse: block new requests while rider is temporarily blocked.
+	if penalty, err := abuse.CheckRiderBlock(ctx, db, userID, time.Now()); err == nil && penalty != nil && penalty.BlockUntil != nil {
+		remaining := abuse.FormatRemaining(*penalty.BlockUntil, time.Now())
+		text := "⏳ Buyurtma vaqtincha cheklangan\n\n" +
+			"Ko‘p marotaba buyurtmani bekor qilganingiz sababli siz vaqtincha yangi buyurtma bera olmaysiz.\n\n" +
+			"⏱ Qayta urinib ko‘rish vaqti: " + remaining + "\n\n" +
+			"Iltimos, haydovchilar vaqtini hurmat qiling."
+		send(bot, chatID, text)
 		return
 	}
 

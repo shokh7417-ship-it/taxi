@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"taxi-mvp/internal/abuse"
 	"taxi-mvp/internal/accounting"
 	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/domain"
@@ -924,5 +925,21 @@ func (s *TripService) CancelByRider(ctx context.Context, tripID string, riderUse
 		s.hub.BroadcastToTrip(tripID, ws.Event{Type: "trip_cancelled", TripStatus: domain.TripStatusCancelledByRider, Payload: map[string]string{"by": "rider"}})
 	}
 	logger.TripEvent("trip_cancel_rider", tripID, "updated", logger.TripEventAttrs(driverUserID, riderUserID)...)
+
+	// Abuse tracking: count only rider cancellations after driver acceptance.
+	if driverUserID != 0 && (current == domain.TripStatusWaiting || current == domain.TripStatusArrived || current == domain.TripStatusStarted) {
+		if penalty, err := abuse.RecordRiderAbuseEvent(ctx, s.db, riderUserID, tripID, time.Now()); err != nil {
+			log.Printf("rider_abuse: record_failed trip_id=%s rider_user_id=%d err=%v", tripID, riderUserID, tripErrStr(err))
+		} else if penalty != nil && penalty.ShouldWarn && s.riderBot != nil {
+			var telegramID int64
+			if err := s.db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, riderUserID).Scan(&telegramID); err == nil && telegramID != 0 {
+				const warnText = "⚠️ Diqqat\n\nSiz buyurtmalarni tez-tez bekor qilyapsiz.\nAgar bu davom etsa, vaqtincha cheklov qo‘yilishi mumkin."
+				if _, err := s.riderBot.Send(tgbotapi.NewMessage(telegramID, warnText)); err != nil {
+					log.Printf("rider_abuse: warn_send_failed rider_user_id=%d err=%v", riderUserID, tripErrStr(err))
+				}
+			}
+		}
+	}
+
 	return &TripActionResult{Result: "updated", Status: domain.TripStatusCancelledByRider}, nil
 }
