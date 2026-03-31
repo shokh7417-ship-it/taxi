@@ -143,40 +143,7 @@ func main() {
 
 // notifyDriversOfDeployment sets all drivers offline, syncs balance<=0 to offline, then notifies all drivers (e.g. after deployment).
 func notifyDriversOfDeployment(dbConn *sql.DB, driverBot *tgbotapi.BotAPI) {
-	// Set all drivers offline so they must go online again after deploy.
-	if _, err := dbConn.Exec(`UPDATE drivers SET is_active = 0`); err != nil {
-		log.Printf("startup_notify: set drivers offline: %v", err)
-	}
-	// Ensure any driver with balance <= 0 is offline.
-	if _, err := dbConn.Exec(`UPDATE drivers SET is_active = 0 WHERE COALESCE(balance, 0) <= 0`); err != nil {
-		log.Printf("startup_notify: sync balance<=0 offline: %v", err)
-	}
-	if driverBot == nil {
-		return
-	}
-	const text = "Tizim yangilandi. Buyurtmalar olish uchun jonli lokatsiyani qayta ulang (ulanganda avtomatik onlayn bo‘lasiz)."
-	rows, err := dbConn.Query(`
-		SELECT u.telegram_id
-		FROM users u
-		JOIN drivers d ON d.user_id = u.id
-		WHERE u.telegram_id IS NOT NULL AND u.telegram_id != 0`)
-	if err != nil {
-		log.Printf("startup_notify: load drivers: %v", err)
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var telegramID int64
-		if err := rows.Scan(&telegramID); err != nil {
-			continue
-		}
-		if telegramID == 0 {
-			continue
-		}
-		msg := tgbotapi.NewMessage(telegramID, text)
-		msg.ReplyMarkup = driverbot.KeyboardForOffline()
-		if _, err := driverBot.Send(msg); err != nil {
-			log.Printf("startup_notify: send to %d: %v", telegramID, err)
-		}
-	}
+	// Legacy deployment notification is disabled; keep function to avoid breaking startup wiring.
+	_ = dbConn
+	_ = driverBot
 }
