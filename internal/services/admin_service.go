@@ -363,8 +363,8 @@ func (s *AdminService) ListActiveRideRequestsForMap(ctx context.Context) ([]Admi
 		SELECT id, pickup_lat, pickup_lng, status
 		FROM ride_requests
 		WHERE pickup_lat IS NOT NULL AND pickup_lng IS NOT NULL
-		  AND status IN (?1, ?2)`,
-		domain.RequestStatusPending, domain.RequestStatusAssigned)
+		  AND status = ?1`,
+		domain.RequestStatusPending)
 	if err != nil {
 		return nil, err
 	}
