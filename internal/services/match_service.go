@@ -116,6 +116,16 @@ func NewMatchService(db *sql.DB, driverBot *tgbotapi.BotAPI, cfg *config.Config)
 	return &MatchService{db: db, bot: driverBot, cfg: cfg, lastDriverNotif: make(map[int64]time.Time)}
 }
 
+// insertOfferNotification stores a SENT row for GET /driver/available-requests polling.
+// chat_id/message_id 0 means no Telegram message (assignment_service skips delete when message_id is 0).
+func (s *MatchService) insertOfferNotification(ctx context.Context, requestID string, driverUserID, chatID int64, messageID int) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO request_notifications (request_id, driver_user_id, chat_id, message_id, status)
+		VALUES (?1, ?2, ?3, ?4, ?5)`,
+		requestID, driverUserID, chatID, messageID, domain.NotificationStatusSent)
+	return err
+}
+
 // driverCandidate is an eligible driver with distance for sorting.
 type driverCandidate struct {
 	UserID     int64
@@ -299,15 +309,24 @@ func (s *MatchService) runPriorityDispatch(ctx context.Context, requestID string
 					tgbotapi.NewInlineKeyboardButtonData("✅ Qabul qilish", acceptCallbackPrefix+requestID),
 				),
 			)
-			sentMsg, err := s.bot.Send(msg)
-			if err != nil {
-				log.Printf("match_service: send to driver %d: %v", c.TelegramID, truncateLog(err.Error(), logMaxChars))
+			sentMsg, sendErr := s.bot.Send(msg)
+			chatID, msgID := c.TelegramID, 0
+			if sendErr != nil {
+				log.Printf("match_service: send to driver %d: %v", c.TelegramID, truncateLog(sendErr.Error(), logMaxChars))
+				// Standalone / web drivers poll GET /driver/available-requests; rows are only created after Send today.
+				// When ENABLE_DRIVER_HTTP_LIVE_LOCATION is on, still record the offer so native clients see it.
+				if s.cfg == nil || !s.cfg.EnableDriverHTTPLiveLocation {
+					continue
+				}
+				chatID = 0
+				msgID = 0
+			} else {
+				msgID = sentMsg.MessageID
+			}
+			if err := s.insertOfferNotification(ctx, requestID, c.UserID, chatID, msgID); err != nil {
+				log.Printf("match_service: insert request_notifications request=%s driver=%d: %v", requestID, c.UserID, truncateLog(err.Error(), logMaxChars))
 				continue
 			}
-			_, _ = s.db.ExecContext(ctx, `
-				INSERT INTO request_notifications (request_id, driver_user_id, chat_id, message_id, status)
-				VALUES (?1, ?2, ?3, ?4, ?5)`,
-				requestID, c.UserID, c.TelegramID, sentMsg.MessageID, domain.NotificationStatusSent)
 			batchDriverIDs = append(batchDriverIDs, c.UserID)
 		}
 
@@ -537,15 +556,22 @@ func (s *MatchService) NotifyDriverOfPendingRequests(ctx context.Context, driver
 				tgbotapi.NewInlineKeyboardButtonData("✅ Qabul qilish", acceptCallbackPrefix+item.requestID),
 			),
 		)
-		sentMsg, err := s.bot.Send(msg)
-		if err != nil {
-			log.Printf("match_service: send pending request to driver %d: %v", driverUserID, truncateLog(err.Error(), logMaxChars))
+		sentMsg, sendErr := s.bot.Send(msg)
+		chatID, msgID := telegramID, 0
+		if sendErr != nil {
+			log.Printf("match_service: send pending request to driver %d: %v", driverUserID, truncateLog(sendErr.Error(), logMaxChars))
+			if s.cfg == nil || !s.cfg.EnableDriverHTTPLiveLocation {
+				continue
+			}
+			chatID = 0
+			msgID = 0
+		} else {
+			msgID = sentMsg.MessageID
+		}
+		if err := s.insertOfferNotification(ctx, item.requestID, driverUserID, chatID, msgID); err != nil {
+			log.Printf("match_service: insert pending notification request=%s driver=%d: %v", item.requestID, driverUserID, truncateLog(err.Error(), logMaxChars))
 			continue
 		}
-		_, _ = s.db.ExecContext(ctx, `
-			INSERT INTO request_notifications (request_id, driver_user_id, chat_id, message_id, status)
-			VALUES (?1, ?2, ?3, ?4, ?5)`,
-			item.requestID, driverUserID, telegramID, sentMsg.MessageID, domain.NotificationStatusSent)
 		time.Sleep(1 * time.Second)
 	}
 }

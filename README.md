@@ -70,7 +70,7 @@ Create a **`.env`** in the project root (optional: use [godotenv](https://github
 | `REQUEST_EXPIRES_SECONDS`, `DRIVER_SEEN_SECONDS` | Request TTL and driver visibility window |
 | `ENABLE_DRIVER_ID_HEADER` | **Default on in code** (unset = `X-Driver-Id` allowed). Set **`false`**, **`0`**, **`no`**, or **`off`** to require Telegram initData only (stricter production) |
 | `DRIVER_AUTH_DEBUG` | `true` / `1` to log boolean flags `driver_header_path_enabled` and `x_driver_id_header_present` per path (never logs header value or ids) |
-| `ENABLE_DRIVER_HTTP_LIVE_LOCATION` | `true` / `1` so **`POST /driver/location`** also refreshes **`last_live_location_at`** / **`live_location_active`** and can mark eligible drivers online (standalone apps); default off |
+| `ENABLE_DRIVER_HTTP_LIVE_LOCATION` | `true` / `1` so **`POST /driver/location`** refreshes live-location columns and drivers can be matched; also **records offers in the DB if Telegram `Send` fails** so **`GET /driver/available-requests`** works for web/native clients; default off |
 | `ADMIN_BOT_TOKEN`, `ADMIN_ID` | Optional admin bot + Telegram user id for fare admin flows |
 | `INFINITE_DRIVER_BALANCE` | If `true`, dispatch ignores balance and trip commission is skipped |
 | `COMMISSION_PERCENT` | Platform commission on normalized fare when infinite balance is off |

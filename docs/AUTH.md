@@ -41,7 +41,7 @@
 - **Telegram-only hardening:** set **`ENABLE_DRIVER_ID_HEADER=false`** so `X-Driver-Id` is ignored; Mini App / WebView must send **`X-Telegram-Init-Data`**.
 - **Security:** with header mode on (default), anyone who can guess or leak ids could impersonate a driver — use HTTPS, app attestation, network rules, monitoring, and edge rate limits where needed.
 - **`Authorization: Bearer ...`:** not validated by this backend today; allowed in CORS for forward compatibility if you add a gateway or future server support.
-- **Dispatch eligibility:** by default, grid dispatch still expects Telegram live-location freshness. For HTTP-only location from a native app, set **`ENABLE_DRIVER_HTTP_LIVE_LOCATION=true`** so **`POST /driver/location`** also updates **`last_live_location_at`** / **`live_location_active`** and may mark the driver online (same DB gates as dispatch). Default **off** preserves current Telegram-first behavior.
+- **Dispatch eligibility:** by default, grid dispatch expects Telegram live-location freshness. For HTTP GPS from a native app, set **`ENABLE_DRIVER_HTTP_LIVE_LOCATION=true`** so **`POST /driver/location`** updates **`last_live_location_at`** / **`live_location_active`**, marks eligible drivers online, and (if Telegram `Send` fails for an offer) a **`request_notifications`** row is still written so **`GET /driver/available-requests`** can show the job. Default **off** preserves Telegram-first behavior.
 
 ## 4. Example request flow
 
