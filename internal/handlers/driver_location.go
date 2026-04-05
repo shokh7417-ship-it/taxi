@@ -90,9 +90,19 @@ func DriverLocation(db *sql.DB, tripSvc *services.TripService, matchSvc *service
 			if cfg != nil && cfg.DispatchDebug {
 				logger.DriverLocation("", driverID, "grid_update", "grid_id="+gridID)
 			}
-			_, _ = db.ExecContext(ctx, `
-				UPDATE drivers SET last_lat = ?1, last_lng = ?2, last_seen_at = ?3, grid_id = ?4 WHERE user_id = ?5`,
-				req.Lat, req.Lng, nowStr, gridID, driverID)
+			if cfg != nil && cfg.EnableDriverHTTPLiveLocation {
+				_, _ = db.ExecContext(ctx, `
+					UPDATE drivers SET last_lat = ?1, last_lng = ?2, last_seen_at = ?3, grid_id = ?4,
+						last_live_location_at = ?3, live_location_active = 1 WHERE user_id = ?5`,
+					req.Lat, req.Lng, nowStr, gridID, driverID)
+				if matchSvc != nil {
+					matchSvc.PulseDriverOnlineFromHTTP(ctx, driverID)
+				}
+			} else {
+				_, _ = db.ExecContext(ctx, `
+					UPDATE drivers SET last_lat = ?1, last_lng = ?2, last_seen_at = ?3, grid_id = ?4 WHERE user_id = ?5`,
+					req.Lat, req.Lng, nowStr, gridID, driverID)
+			}
 		}
 		var tripID string
 		var ignoredReason string
@@ -134,7 +144,8 @@ func DriverLocation(db *sql.DB, tripSvc *services.TripService, matchSvc *service
 				}
 			}
 		}
-		// Mini App location updates grid/trip only. Dispatch and "online" for drivers use Telegram live location, not this endpoint.
+		// Without ENABLE_DRIVER_HTTP_LIVE_LOCATION, this endpoint updates grid/trip only; Telegram live drives dispatch eligibility.
+		// When ENABLE_DRIVER_HTTP_LIVE_LOCATION=true, last_live_location_at / live_location_active are refreshed here for standalone clients (see README).
 
 		if ignoredReason != "" {
 			c.JSON(http.StatusOK, gin.H{"ok": true, "ignored": ignoredReason})

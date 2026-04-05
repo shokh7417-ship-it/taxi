@@ -100,7 +100,7 @@ func main() {
 	go services.RunDriverApprovalNotifier(ctx, database, driverBot)
 	go driverbot.RunLegalReacceptNotifier(ctx, database, driverBot)
 
-	srv := server.New(database, cfg, tripSvc, matchSvc, driverBot, riderBot, hub, fareSvc)
+	srv := server.New(database, cfg, tripSvc, matchSvc, assignSvc, driverBot, riderBot, hub, fareSvc)
 	httpServer := &http.Server{Addr: cfg.APIAddr, Handler: srv}
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

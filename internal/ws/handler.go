@@ -4,11 +4,13 @@ import (
 	"database/sql"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"taxi-mvp/internal/auth"
+	"taxi-mvp/internal/domain"
 	"taxi-mvp/internal/logger"
 )
 
@@ -37,7 +39,8 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 }
 
 // ServeWsWithAuth requires Telegram Mini App auth; only rider or assigned driver of the trip may subscribe.
-func ServeWsWithAuth(hub *Hub, db *sql.DB, driverBotToken, riderBotToken string, w http.ResponseWriter, r *http.Request) {
+// When enableDriverIDHeader is true and init data is absent, accepts header X-Driver-Id (internal driver user id) for drivers only.
+func ServeWsWithAuth(hub *Hub, db *sql.DB, driverBotToken, riderBotToken string, enableDriverIDHeader bool, w http.ResponseWriter, r *http.Request) {
 	tripID := strings.TrimSpace(r.URL.Query().Get("trip_id"))
 	if tripID == "" {
 		http.Error(w, "trip_id required", http.StatusBadRequest)
@@ -47,32 +50,58 @@ func ServeWsWithAuth(hub *Hub, db *sql.DB, driverBotToken, riderBotToken string,
 	if initData == "" {
 		initData = r.URL.Query().Get("init_data")
 	}
-	if initData == "" {
+	ctx := r.Context()
+	var userID int64
+	var role string
+
+	if initData != "" {
+		var telegramUserID int64
+		var err error
+		telegramUserID, err = auth.VerifyMiniAppInitData(driverBotToken, initData)
+		if err != nil {
+			telegramUserID, err = auth.VerifyMiniAppInitData(riderBotToken, initData)
+		}
+		if err != nil {
+			logger.AuthFailure("invalid init data")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"invalid init data"}`))
+			return
+		}
+		userID, role, err = auth.ResolveUserFromTelegramID(ctx, db, telegramUserID)
+		if err != nil {
+			logger.AuthFailure("user not found")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"user not found"}`))
+			return
+		}
+	} else if enableDriverIDHeader {
+		driverIDStr := strings.TrimSpace(r.Header.Get(auth.HeaderDriverID))
+		if driverIDStr == "" {
+			logger.AuthFailure("missing init data")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"missing init data"}`))
+			return
+		}
+		parsed, err := strconv.ParseInt(driverIDStr, 10, 64)
+		if err != nil || parsed <= 0 {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"invalid driver id"}`))
+			return
+		}
+		if _, err := auth.ResolveDriverByUserID(ctx, db, parsed); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"user not found"}`))
+			return
+		}
+		userID = parsed
+		role = domain.RoleDriver
+	} else {
 		logger.AuthFailure("missing init data")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":"missing init data"}`))
 		return
 	}
-	var telegramUserID int64
-	var err error
-	telegramUserID, err = auth.VerifyMiniAppInitData(driverBotToken, initData)
-	if err != nil {
-		telegramUserID, err = auth.VerifyMiniAppInitData(riderBotToken, initData)
-	}
-	if err != nil {
-		logger.AuthFailure("invalid init data")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"invalid init data"}`))
-		return
-	}
-	ctx := r.Context()
-	userID, role, err := auth.ResolveUserFromTelegramID(ctx, db, telegramUserID)
-	if err != nil {
-		logger.AuthFailure("user not found")
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"user not found"}`))
-		return
-	}
+
 	allowed, err := auth.AuthorizeTripAccess(ctx, db, userID, tripID, role)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

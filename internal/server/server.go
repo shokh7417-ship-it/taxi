@@ -18,8 +18,9 @@ import (
 // New creates a Gin engine with API routes and optional webapp static files.
 // hub can be nil; if set, GET /ws is registered. fareSvc can be nil (then fare uses config only).
 // matchSvc and driverBot are used for driver auto-availability and notifications (e.g. after trip finish + Mini App location).
+// assignSvc is used for POST /driver/accept-request (same TryAssign as the driver bot); may be nil (then accept returns 503).
 // riderBot is optional; used for rider referral link (bot username).
-func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc *services.MatchService, driverBot *tgbotapi.BotAPI, riderBot *tgbotapi.BotAPI, hub *ws.Hub, fareSvc *services.FareService) *gin.Engine {
+func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc *services.MatchService, assignSvc *services.AssignmentService, driverBot *tgbotapi.BotAPI, riderBot *tgbotapi.BotAPI, hub *ws.Hub, fareSvc *services.FareService) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	// Avoid gin's default access logger which may include full query strings
@@ -49,14 +50,14 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	r.GET("/", healthHandler)
 	r.HEAD("/", healthHandler)
 
-	tryDriverID := auth.TryDriverIDHeader(db)
+	tryDriverID := auth.TryDriverIDHeader(db, cfg.EnableDriverIDHeader)
 	driverAuth := auth.RequireDriverAuth(db, cfg.DriverBotToken, cfg.EnableDriverIDHeader)
 	riderAuth := auth.RequireRiderAuth(db, cfg.RiderBotToken)
 	appUserAuth := auth.RequireMiniAppAuthDriverOrRider(db, cfg.DriverBotToken, cfg.RiderBotToken)
 
 	if hub != nil {
 		r.GET("/ws", func(c *gin.Context) {
-			ws.ServeWsWithAuth(hub, db, cfg.DriverBotToken, cfg.RiderBotToken, c.Writer, c.Request)
+			ws.ServeWsWithAuth(hub, db, cfg.DriverBotToken, cfg.RiderBotToken, cfg.EnableDriverIDHeader, c.Writer, c.Request)
 		})
 	}
 
@@ -70,6 +71,8 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	r.GET("/driver/referral-link", tryDriverID, driverAuth, handlers.DriverReferralLink(db, driverBot))
 	r.GET("/driver/promo-program", tryDriverID, driverAuth, handlers.DriverPromoProgram(db))
 	r.GET("/driver/referral-status", tryDriverID, driverAuth, handlers.DriverReferralStatus(db))
+	r.GET("/driver/available-requests", tryDriverID, driverAuth, handlers.DriverAvailableRequests(db))
+	r.POST("/driver/accept-request", tryDriverID, driverAuth, handlers.DriverAcceptRequest(db, assignSvc, tripSvc))
 	r.POST("/trip/cancel/rider", riderAuth, handlers.TripCancelRider(db, tripSvc))
 	r.GET("/rider/referral-link", riderAuth, handlers.RiderReferralLink(db, riderBot))
 
@@ -95,7 +98,7 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Telegram-Init-Data, X-Driver-Id")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Telegram-Init-Data, X-Driver-Id")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return

@@ -26,6 +26,7 @@ type Config struct {
 	RiderMapURL             string   // Full URL to rider map HTML (e.g. https://example.com/webapp/rider-map.html); if empty, derived as WebAppURL + "/rider-map.html"
 	APIAddr                 string   // HTTP API address for driver location and trip (e.g. :8080)
 	EnableDriverIDHeader    bool     // If true, allow X-Driver-Id header as fallback when init data is missing (only if you trust the Mini App URL)
+	EnableDriverHTTPLiveLocation bool // If true, POST /driver/location also refreshes last_live_location_at / live_location_active (and may mark driver online) for standalone apps; default off preserves Telegram-only live semantics
 	AdminID                 int64    // Telegram user ID of the admin (only this user can use admin bot fare menu)
 	AdminBotToken           string   // Telegram bot token for admin bot (optional; if empty, admin bot is not started)
 	InfiniteDriverBalance   bool     // If true, dispatch ignores balance and no commission is deducted (temporary launch mode)
@@ -67,7 +68,8 @@ func Load() (*Config, error) {
 		WebAppURL:              getEnv("WEBAPP_URL", "https://example.com/webapp"),
 		RiderMapURL:            getRiderMapURL(getEnv("WEBAPP_URL", "https://example.com/webapp"), getEnv("RIDER_MAP_URL", "")),
 		APIAddr:                getAPIAddr(),
-		EnableDriverIDHeader:   getEnv("ENABLE_DRIVER_ID_HEADER", "") == "true" || getEnv("ENABLE_DRIVER_ID_HEADER", "") == "1",
+		EnableDriverIDHeader:        getEnv("ENABLE_DRIVER_ID_HEADER", "") == "true" || getEnv("ENABLE_DRIVER_ID_HEADER", "") == "1",
+		EnableDriverHTTPLiveLocation: getEnv("ENABLE_DRIVER_HTTP_LIVE_LOCATION", "") == "true" || getEnv("ENABLE_DRIVER_HTTP_LIVE_LOCATION", "") == "1",
 		AdminID:                getEnvInt64("ADMIN_ID", 0),
 		AdminBotToken:          getEnvFirst("ADMIN_BOT_TOKEN", "ADMIN_BOT", ""),
 		InfiniteDriverBalance:  getEnv("INFINITE_DRIVER_BALANCE", "true") == "true" || getEnv("INFINITE_DRIVER_BALANCE", "true") == "1",

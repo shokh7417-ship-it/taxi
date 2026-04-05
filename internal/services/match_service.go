@@ -338,6 +338,41 @@ func (s *MatchService) BroadcastRequest(ctx context.Context, requestID string) e
 	return nil
 }
 
+// PulseDriverOnlineFromHTTP marks an eligible driver online and triggers NotifyDriverOfPendingRequests when
+// ENABLE_DRIVER_HTTP_LIVE_LOCATION is used with POST /driver/location. Same DB gates as dispatch (approved, legal, balance, profile fields).
+// No-op if the driver already has an active trip or fails eligibility. Does not change Telegram live-location behavior when the flag is off.
+func (s *MatchService) PulseDriverOnlineFromHTTP(ctx context.Context, driverUserID int64) {
+	if s == nil || s.db == nil {
+		return
+	}
+	var activeTrip string
+	_ = s.db.QueryRowContext(ctx, `
+		SELECT id FROM trips WHERE driver_user_id = ?1 AND status IN ('WAITING','ARRIVED','STARTED') LIMIT 1`,
+		driverUserID).Scan(&activeTrip)
+	if activeTrip != "" {
+		return
+	}
+	balanceCond := " AND d.balance > 0"
+	if s.cfg != nil && s.cfg.InfiniteDriverBalance {
+		balanceCond = ""
+	}
+	var uid int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT d.user_id FROM drivers d
+		WHERE d.user_id = ?1 AND d.verification_status = 'approved' AND `+legal.SQLDriverDispatchLegalOK+`
+		AND d.phone IS NOT NULL AND d.phone != ''
+		AND d.car_type IS NOT NULL AND d.car_type != ''
+		AND d.color IS NOT NULL AND d.color != ''
+		AND d.plate IS NOT NULL AND d.plate != ''`+balanceCond,
+		driverUserID).Scan(&uid)
+	if err != nil {
+		return
+	}
+	nowStr := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, _ = s.db.ExecContext(ctx, `UPDATE drivers SET is_active = 1, manual_offline = 0, last_seen_at = ?1 WHERE user_id = ?2`, nowStr, driverUserID)
+	go s.NotifyDriverOfPendingRequests(context.Background(), driverUserID)
+}
+
 // NotifyDriverOfPendingRequests sends any PENDING ride requests (within this driver's radius) to a driver who just came online.
 // Skips requests already sent to this driver (request_notifications). Does not change existing dispatch logic.
 // A short delay allows a nearly-simultaneous rider request to be committed so the driver receives it.

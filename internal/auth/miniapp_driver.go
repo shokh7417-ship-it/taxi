@@ -10,11 +10,15 @@ import (
 )
 
 // TryDriverIDHeader is Gin middleware that sets the driver in request context from X-Driver-Id when present and valid.
-// Use only if you trust requests carrying X-Driver-Id (e.g. from your Mini App over HTTPS).
-// Verifies the user exists in the drivers table. Run this before RequireDriverAuth so that when
-// the Mini App sends X-Driver-Id, Start/Cancel/Finish and driver location work without initData.
-func TryDriverIDHeader(db *sql.DB) gin.HandlerFunc {
+// When enable is false (default production: ENABLE_DRIVER_ID_HEADER off), the header is ignored — same as Telegram-only deploys.
+// When enable is true, verifies the user exists in the drivers table. Run this before RequireDriverAuth so that when
+// the client sends X-Driver-Id, Start/Cancel/Finish and driver location work without initData.
+func TryDriverIDHeader(db *sql.DB, enable bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !enable {
+			c.Next()
+			return
+		}
 		driverIDStr := strings.TrimSpace(c.GetHeader(HeaderDriverID))
 		if driverIDStr == "" {
 			c.Next()

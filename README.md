@@ -68,7 +68,8 @@ Create a **`.env`** in the project root (optional: use [godotenv](https://github
 | `STARTING_FEE`, `PRICE_PER_KM` | Legacy/config fare when DB fare settings are absent |
 | `MATCH_RADIUS_KM`, `EXPANDED_RADIUS_KM`, `RADIUS_EXPANSION_MINUTES` | Dispatch radii |
 | `REQUEST_EXPIRES_SECONDS`, `DRIVER_SEEN_SECONDS` | Request TTL and driver visibility window |
-| `ENABLE_DRIVER_ID_HEADER` | `true` / `1` to allow **`X-Driver-Id`** for Mini App calls (trust boundary) |
+| `ENABLE_DRIVER_ID_HEADER` | `true` / `1` to allow **`X-Driver-Id`** for driver HTTP + WebSocket (trust boundary; default off = header ignored) |
+| `ENABLE_DRIVER_HTTP_LIVE_LOCATION` | `true` / `1` so **`POST /driver/location`** also refreshes **`last_live_location_at`** / **`live_location_active`** and can mark eligible drivers online (standalone apps); default off |
 | `ADMIN_BOT_TOKEN`, `ADMIN_ID` | Optional admin bot + Telegram user id for fare admin flows |
 | `INFINITE_DRIVER_BALANCE` | If `true`, dispatch ignores balance and trip commission is skipped |
 | `COMMISSION_PERCENT` | Platform commission on normalized fare when infinite balance is off |
@@ -129,7 +130,7 @@ Public prefixes include **`/admin/...`** (dashboard), **`/api/...`**, **`/v1/...
 |--------|------|------|
 | `GET` / `HEAD` | `/health`, `/` | No |
 | `GET` | `/webapp/*` | Static files from `./webapp` |
-| `GET` | `/ws?trip_id=...` | Telegram initData (driver or rider on trip) |
+| `GET` | `/ws?trip_id=...` | Telegram initData (driver or rider on trip); **`X-Driver-Id`** only if **`ENABLE_DRIVER_ID_HEADER`** |
 
 ### Trip and driver (Mini App / bots)
 
@@ -138,7 +139,7 @@ Driver routes use **`tryDriverID`** then **`RequireDriverAuth`** (Telegram initD
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/trip/:id` | Trip info (`status` may be **`WAITING`**, **`ARRIVED`**, **`STARTED`**, …) |
-| `POST` | `/driver/location` | Driver location ping (map tracking; **live location** drives dispatch) |
+| `POST` | `/driver/location` | Driver location ping (map tracking). Dispatch freshness uses Telegram live unless **`ENABLE_DRIVER_HTTP_LIVE_LOCATION`** (see **`docs/AUTH.md`**) |
 | `POST` | `/trip/arrived` | **`WAITING` → `ARRIVED`**: server checks pickup distance + fresh Telegram live location (same rules as starting from `WAITING`). Optional explicit “at pickup” step. Body: `{ "trip_id" }`. |
 | `POST` | `/trip/start` | **`WAITING` or `ARRIVED` → `STARTED`**. From **`WAITING`**, server enforces near-pickup + live location (do not rely on Mini App alone). From **`ARRIVED`**, proximity is **not** re-checked. Distance/fare accumulation still only after **`STARTED`**. On failure: e.g. too early → **400** with Uzbek message *“Mijozga hali yetib bormagansiz…”* |
 | `POST` | `/trip/finish` | Finish trip: **trip → `FINISHED`**, first-3 promo, referral check, and **commission** run in **one DB transaction**; if any of those steps fails, the transaction rolls back (trip stays non-**`FINISHED`**). **Telegram** notifications run **after** a successful commit. |
@@ -147,6 +148,8 @@ Driver routes use **`tryDriverID`** then **`RequireDriverAuth`** (Telegram initD
 | `GET` | `/driver/referral-link` | JSON `{ "referral_link": "..." }` |
 | `GET` | `/driver/promo-program` | Signup + first-3-trip promo progress + `promo_balance` |
 | `GET` | `/driver/referral-status` | If referred: inviter id, finished trip count, threshold 3, reward granted flag |
+| `GET` | `/driver/available-requests` | Optional **`assigned_trip`** (`trip_id`, `status`); queue arrays **`available_requests`**, **`requests`**, **`pending_requests`**, **`queue`**, **`orders`**, **`jobs`** (same items; client may merge/dedupe by `request_id`) |
+| `POST` | `/driver/accept-request` | Body **`request_id`** (accept offer) and/or **`trip_id`** (idempotent if already assigned). Uses same **`TryAssign`** as driver bot. **409** if request taken/expired |
 
 ### Legal (Mini App)
 
@@ -161,7 +164,7 @@ Driver routes use **`tryDriverID`** then **`RequireDriverAuth`** (Telegram initD
 
 Dispatch and driver live-location gating require the **driver** pair at active versions (see **`internal/legal`**, **`SQLDriverDispatchLegalOK`**).
 
-CORS (see **`server.go`**): allows `X-Telegram-Init-Data`, `X-Driver-Id`. Full auth behavior: **`docs/AUTH.md`**.
+CORS (see **`server.go`**): allows `Authorization`, `X-Telegram-Init-Data`, `X-Driver-Id`. Full auth behavior: **`docs/AUTH.md`**.
 
 ---
 
@@ -293,6 +296,7 @@ All amounts below are **promo platform credit** unless stated otherwise: **not r
 4. **Finish:** Rider and driver notifications; **promo** and **referral** grants visible in DB (`drivers.promo_balance`, `driver_ledger`).
 5. **Admin / legal:** If used, verify verification and legal acceptance flows.
 6. **Shutdown:** SIGINT/SIGTERM; process exits cleanly.
+7. **Optional native driver client:** With **`ENABLE_DRIVER_ID_HEADER`** and **`ENABLE_DRIVER_HTTP_LIVE_LOCATION`** on a test stack, **`GET /driver/available-requests`** (with initData or `X-Driver-Id`), **`POST /driver/accept-request`**, and **`GET /ws`** for an assigned trip behave without changing Telegram bot flows on production (flags off).
 
 ---
 
