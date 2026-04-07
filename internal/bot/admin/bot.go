@@ -232,11 +232,7 @@ func handleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB
 		return
 	}
 	if driverTgID != 0 && driverBot != nil {
-		rej := tgbotapi.NewMessage(driverTgID, driverbot.DriverApplicationRejectedTelegramText)
-		rej.ReplyMarkup = driverbot.RejectionAfterAdminRefillKeyboard()
-		if _, err := driverBot.Send(rej); err != nil {
-			log.Printf("admin bot: notify rejected driver via driver bot send error user_id=%d: %v", driverUserID, err)
-		}
+		driverbot.SendApplicationRejectedMessage(driverBot, driverTgID)
 	}
 
 	// Update admin message to show rejection and remove buttons.

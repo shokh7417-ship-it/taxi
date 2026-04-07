@@ -481,6 +481,24 @@ func RejectionAfterAdminRefillKeyboard() tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
+// SendApplicationRejectedMessage clears any stale reply keyboard (e.g. "⏳ Тасдиқлаш кутилмоқда"),
+// then sends the rejection notice with an inline "refill application" button.
+func SendApplicationRejectedMessage(bot *tgbotapi.BotAPI, chatID int64) {
+	if bot == nil || chatID == 0 {
+		return
+	}
+	// Remove reply keyboard from chat (cannot combine reply-remove with inline keyboard in a single message).
+	rm := tgbotapi.NewMessage(chatID, "\u200b")
+	rm.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
+	_, _ = bot.Send(rm)
+
+	msg := tgbotapi.NewMessage(chatID, DriverApplicationRejectedTelegramText)
+	msg.ReplyMarkup = RejectionAfterAdminRefillKeyboard()
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("driver: send application rejected message chat_id=%d: %v", chatID, err)
+	}
+}
+
 func driverKeyboardForVerificationPending() tgbotapi.ReplyKeyboardMarkup {
 	kb := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
@@ -1745,11 +1763,7 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 				log.Printf("driver: driver application rejected and reset user_id=%d", driverUserID)
 				var driverTgID int64
 				if err := db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, driverUserID).Scan(&driverTgID); err == nil && driverTgID != 0 {
-					msg := tgbotapi.NewMessage(driverTgID, DriverApplicationRejectedTelegramText)
-					msg.ReplyMarkup = RejectionAfterAdminRefillKeyboard()
-					if _, err := bot.Send(msg); err != nil {
-						log.Printf("driver: notify rejected driver send error user_id=%d: %v", driverUserID, err)
-					}
+					SendApplicationRejectedMessage(bot, driverTgID)
 				}
 			}
 		}

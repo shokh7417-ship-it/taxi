@@ -181,11 +181,7 @@ func (h *AdminHandlers) VerifyDriver(c *gin.Context) {
 		return
 	}
 	if req.Status == "rejected" && h.driverBot != nil && telegramID != 0 {
-		msg := tgbotapi.NewMessage(telegramID, driverbot.DriverApplicationRejectedTelegramText)
-		msg.ReplyMarkup = driverbot.RejectionAfterAdminRefillKeyboard()
-		if _, err := h.driverBot.Send(msg); err != nil {
-			log.Printf("admin VerifyDriver: notify rejected driver telegram_id=%d: %v", telegramID, err)
-		}
+		driverbot.SendApplicationRejectedMessage(h.driverBot, telegramID)
 	}
 	c.Status(http.StatusNoContent)
 }

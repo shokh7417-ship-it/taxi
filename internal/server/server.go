@@ -74,6 +74,9 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	r.GET("/driver/referral-status", tryDriverID, driverAuth, handlers.DriverReferralStatus(db))
 	r.GET("/driver/available-requests", tryDriverID, driverAuth, handlers.DriverAvailableRequests(db))
 	r.POST("/driver/accept-request", tryDriverID, driverAuth, handlers.DriverAcceptRequest(db, assignSvc, tripSvc))
+	// API alias for dashboards / gateways that mount under /api.
+	r.GET("/api/driver/available-requests", tryDriverID, driverAuth, handlers.DriverAvailableRequests(db))
+	r.POST("/api/driver/accept-request", tryDriverID, driverAuth, handlers.DriverAcceptRequest(db, assignSvc, tripSvc))
 	r.POST("/trip/cancel/rider", riderAuth, handlers.TripCancelRider(db, tripSvc))
 	r.GET("/rider/referral-link", riderAuth, handlers.RiderReferralLink(db, riderBot))
 

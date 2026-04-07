@@ -144,7 +144,8 @@ func DriverAcceptRequest(db *sql.DB, assignSvc *services.AssignmentService, trip
 		}
 
 		if assignSvc == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "assignment unavailable"})
+			// Admin dashboard uses this path as a "resend/assign" mechanism via X-Driver-Id.
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "match service not configured"})
 			return
 		}
 		assigned, tripID, err := assignSvc.TryAssign(ctx, req.RequestID, driverID)
@@ -153,6 +154,17 @@ func DriverAcceptRequest(db *sql.DB, assignSvc *services.AssignmentService, trip
 			return
 		}
 		if !assigned {
+			// Distinguish unknown request_id (404) from "already taken/expired" (409).
+			var exists int
+			e := db.QueryRowContext(ctx, `SELECT 1 FROM ride_requests WHERE id = ?1`, req.RequestID).Scan(&exists)
+			if e == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "unknown request_id", "request_id": req.RequestID})
+				return
+			}
+			if e != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "lookup failed", "request_id": req.RequestID})
+				return
+			}
 			c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "request no longer available", "request_id": req.RequestID})
 			return
 		}
