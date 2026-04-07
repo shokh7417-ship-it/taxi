@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -15,6 +16,14 @@ import (
 	"taxi-mvp/internal/domain"
 	"taxi-mvp/internal/legal"
 	"taxi-mvp/internal/utils"
+)
+
+var (
+	// ErrAdminOfferServiceUnavailable means MatchService cannot send offers (missing bot or service not wired).
+	ErrAdminOfferServiceUnavailable = errors.New("offer service not configured")
+	ErrAdminOfferUnknownRequest     = errors.New("unknown request_id")
+	ErrAdminOfferUnknownDriver      = errors.New("unknown driver_id")
+	ErrAdminOfferRequestNotAvail    = errors.New("request not available")
 )
 
 const (
@@ -120,10 +129,116 @@ func NewMatchService(db *sql.DB, driverBot *tgbotapi.BotAPI, cfg *config.Config)
 // chat_id/message_id 0 means no Telegram message (assignment_service skips delete when message_id is 0).
 func (s *MatchService) insertOfferNotification(ctx context.Context, requestID string, driverUserID, chatID int64, messageID int) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO request_notifications (request_id, driver_user_id, chat_id, message_id, status)
+		INSERT OR IGNORE INTO request_notifications (request_id, driver_user_id, chat_id, message_id, status)
 		VALUES (?1, ?2, ?3, ?4, ?5)`,
 		requestID, driverUserID, chatID, messageID, domain.NotificationStatusSent)
 	return err
+}
+
+// AdminOfferRequestToDriver sends a single offer for a request to a specific driver (admin dashboard Live Map).
+// It does NOT auto-assign; it only notifies the driver and records a SENT row in request_notifications.
+func (s *MatchService) AdminOfferRequestToDriver(ctx context.Context, requestID string, driverUserID int64) error {
+	if s == nil || s.db == nil || s.bot == nil {
+		return ErrAdminOfferServiceUnavailable
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" || driverUserID <= 0 {
+		return fmt.Errorf("invalid request_id or driver_id")
+	}
+
+	// Ensure request exists and is dispatchable (PENDING + TTL).
+	var pickupLat, pickupLng, radiusKm float64
+	var st string
+	err := s.db.QueryRowContext(ctx, `SELECT pickup_lat, pickup_lng, radius_km, status FROM ride_requests WHERE id = ?1`, requestID).
+		Scan(&pickupLat, &pickupLng, &radiusKm, &st)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAdminOfferUnknownRequest
+		}
+		return err
+	}
+	if st != domain.RequestStatusPending || !s.requestStillDispatchable(ctx, requestID) {
+		return ErrAdminOfferRequestNotAvail
+	}
+	var riderPhone string
+	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(u.phone,'') FROM ride_requests r JOIN users u ON u.id = r.rider_user_id WHERE r.id = ?1`, requestID).Scan(&riderPhone)
+	riderPhone = strings.TrimSpace(riderPhone)
+
+	// Load driver + enforce the same base eligibility gates as dispatch (approved + legal + balance/profile gates).
+	var telegramID int64
+	var lat, lng float64
+	var isActive int
+	var lastSeenAt, lastLiveAt sql.NullString
+	var liveLocationActive int
+	balanceCond := " AND d.balance > 0"
+	if s.cfg != nil && s.cfg.InfiniteDriverBalance {
+		balanceCond = ""
+	}
+	err = s.db.QueryRowContext(ctx, `
+		SELECT u.telegram_id, d.last_lat, d.last_lng, d.is_active, d.last_seen_at, d.last_live_location_at, COALESCE(d.live_location_active, 0)
+		FROM drivers d JOIN users u ON u.id = d.user_id
+		WHERE d.user_id = ?1 AND d.verification_status = 'approved' AND `+legal.SQLDriverDispatchLegalOK+` AND d.last_lat IS NOT NULL AND d.last_lng IS NOT NULL`+balanceCond,
+		driverUserID).Scan(&telegramID, &lat, &lng, &isActive, &lastSeenAt, &lastLiveAt, &liveLocationActive)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrAdminOfferUnknownDriver
+		}
+		return err
+	}
+	if isActive != 1 || liveLocationActive != 1 {
+		return ErrAdminOfferRequestNotAvail
+	}
+	if !lastLiveAt.Valid || lastLiveAt.String == "" {
+		return ErrAdminOfferRequestNotAvail
+	}
+	if t, perr := parseUTCTime(lastLiveAt.String); perr == nil {
+		if time.Since(t) > driverLocationFreshnessSeconds*time.Second {
+			return ErrAdminOfferRequestNotAvail
+		}
+	} else {
+		return ErrAdminOfferRequestNotAvail
+	}
+	if !lastSeenAt.Valid || lastSeenAt.String == "" {
+		return ErrAdminOfferRequestNotAvail
+	}
+	if t, perr := parseUTCTime(lastSeenAt.String); perr == nil {
+		if time.Since(t) > driverLocationFreshnessSeconds*time.Second {
+			return ErrAdminOfferRequestNotAvail
+		}
+	} else {
+		return ErrAdminOfferRequestNotAvail
+	}
+
+	distKm := utils.HaversineMeters(pickupLat, pickupLng, lat, lng) / 1000
+	if radiusKm > 0 && distKm > radiusKm {
+		// Respect request radius.
+		return ErrAdminOfferRequestNotAvail
+	}
+
+	text := formatOrderMessageToDriver(distKm, riderPhone)
+	if !s.isDriverSharingLiveLocation(ctx, driverUserID) {
+		text += liveLocationOrderHint
+	}
+	msg := tgbotapi.NewMessage(telegramID, text)
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Қабул қилиш", acceptCallbackPrefix+requestID),
+		),
+	)
+	sentMsg, sendErr := s.bot.Send(msg)
+	chatID, msgID := telegramID, 0
+	if sendErr != nil {
+		log.Printf("match_service: admin offer send to driver=%d: %v", telegramID, truncateLog(sendErr.Error(), logMaxChars))
+		if s.cfg == nil || !s.cfg.EnableDriverHTTPLiveLocation {
+			return ErrAdminOfferServiceUnavailable
+		}
+		chatID = 0
+		msgID = 0
+	} else {
+		msgID = sentMsg.MessageID
+	}
+	_ = s.insertOfferNotification(ctx, requestID, driverUserID, chatID, msgID)
+	return nil
 }
 
 // driverCandidate is an eligible driver with distance for sorting.

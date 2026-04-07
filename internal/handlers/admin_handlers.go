@@ -50,6 +50,7 @@ func (h *AdminHandlers) registerRoutes(g *gin.RouterGroup) {
 	g.GET("/drivers", h.ListDrivers)
 	g.GET("/map/drivers", h.ListDriversForMap)
 	g.GET("/map/ride-requests", h.ListRideRequestsForMap)
+	g.POST("/ride-requests/:request_id/offer", h.OfferRideRequestToDriver)
 	g.GET("/nearest-drivers", h.NearestDriversForRequest)
 	g.GET("/nearest-requests", h.NearestRequestsForDriver)
 	g.GET("/drivers/:id/ledger", h.ListDriverLedger)
@@ -128,6 +129,45 @@ func (h *AdminHandlers) NearestDriversForRequest(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, drivers)
+}
+
+type offerRideRequestBody struct {
+	DriverID int64 `json:"driver_id"`
+}
+
+// OfferRideRequestToDriver sends an offer for this request to a specific driver (POST /admin/ride-requests/:request_id/offer).
+// This does not auto-assign; it only notifies + records request_notifications so apps can poll.
+func (h *AdminHandlers) OfferRideRequestToDriver(c *gin.Context) {
+	requestID := strings.TrimSpace(c.Param("request_id"))
+	if requestID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "request_id required"})
+		return
+	}
+	var body offerRideRequestBody
+	if err := c.ShouldBindJSON(&body); err != nil || body.DriverID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "invalid body"})
+		return
+	}
+	if h.matchSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "offer service not configured"})
+		return
+	}
+	err := h.matchSvc.AdminOfferRequestToDriver(c.Request.Context(), requestID, body.DriverID)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrAdminOfferServiceUnavailable):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "offer service not configured"})
+		case errors.Is(err, services.ErrAdminOfferUnknownRequest), errors.Is(err, services.ErrAdminOfferUnknownDriver):
+			c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "unknown request_id or driver_id"})
+		case errors.Is(err, services.ErrAdminOfferRequestNotAvail):
+			c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "request not available"})
+		default:
+			log.Printf("admin offer request=%s driver=%d err=%v", requestID, body.DriverID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "failed to send offer"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "sent": true, "request_id": requestID, "driver_id": body.DriverID})
 }
 
 type adminNearestRequest struct {

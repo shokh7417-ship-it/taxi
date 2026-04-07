@@ -90,15 +90,38 @@ type adminLegalHTTP struct {
 	db *sql.DB
 }
 
+func dashboardLegalDocumentCode(documentType string) string {
+	switch strings.TrimSpace(documentType) {
+	case legal.DocPrivacyPolicyDriver, legal.DocPrivacyPolicyUser, legal.DocPrivacyPolicy:
+		// Dashboard expects legacy privacy_policy for both actors.
+		return legal.DocPrivacyPolicy
+	default:
+		return strings.TrimSpace(documentType)
+	}
+}
+
+func dashboardActorType(role string) string {
+	switch strings.TrimSpace(strings.ToLower(role)) {
+	case "driver":
+		return "driver"
+	default:
+		// Dashboards tend to use "user" rather than "rider".
+		return "user"
+	}
+}
+
 func legalAcceptanceJSON(userID int64, documentType string, version int, acceptedAt string, matchesActive bool, role, userName, clientIP, userAgent string) gin.H {
 	ip := strings.TrimSpace(clientIP)
 	ua := strings.TrimSpace(userAgent)
 	lab := versionLabel(version)
+	code := dashboardLegalDocumentCode(documentType)
+	actorType := dashboardActorType(role)
 	return gin.H{
 		"user_id":                userID,
 		"actor_id":               userID,
+		"actor_type":             actorType,
 		"document_type":          documentType,
-		"document_code":          documentType,
+		"document_code":          code,
 		"version":                version,
 		"document_version":       version,
 		"version_label":          lab,
@@ -131,7 +154,7 @@ func (h *adminLegalHTTP) buildLegalMonitoringData(ctx context.Context) (docList 
 			lab := versionLabel(d.Version)
 			docList = append(docList, gin.H{
 				"document_type":          t,
-				"document_code":          t,
+				"document_code":          dashboardLegalDocumentCode(t),
 				"version":                d.Version,
 				"document_version":       d.Version,
 				"version_label":          lab,
@@ -317,11 +340,18 @@ func (h *adminLegalHTTP) computeNonCompliant(ctx context.Context, actorFilter st
 	sort.Slice(buf, func(i, j int) bool { return buf[i].uid > buf[j].uid })
 	out := make([]gin.H, 0, len(buf))
 	for _, r := range buf {
+		mapped := make([]string, 0, len(r.miss))
+		for _, dt := range r.miss {
+			mapped = append(mapped, dashboardLegalDocumentCode(dt))
+		}
 		out = append(out, gin.H{
 			"user_id":           r.uid,
 			"actor_id":          r.uid,
+			"actor_type":        dashboardActorType(r.role),
 			"role":              r.role,
-			"missing_documents": r.miss,
+			// Prefer dashboard-friendly codes (privacy_policy legacy) while still exposing raw types for debugging.
+			"missing_documents":      mapped,
+			"missing_document_types": r.miss,
 		})
 	}
 	return out, nil
@@ -385,7 +415,7 @@ func (h *adminLegalHTTP) documents(c *gin.Context) {
 		lab := versionLabel(ver)
 		out = append(out, gin.H{
 			"document_type":    dt,
-			"document_code":    dt,
+			"document_code":    dashboardLegalDocumentCode(dt),
 			"version":          ver,
 			"document_version": ver,
 			"version_label":    lab,
