@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -14,6 +15,7 @@ import (
 	driverbot "taxi-mvp/internal/bot/driver"
 	"taxi-mvp/internal/repositories"
 	"taxi-mvp/internal/services"
+	"taxi-mvp/internal/utils"
 )
 
 // AdminHandlers exposes admin HTTP endpoints.
@@ -49,6 +51,7 @@ func (h *AdminHandlers) registerRoutes(g *gin.RouterGroup) {
 	g.GET("/map/drivers", h.ListDriversForMap)
 	g.GET("/map/ride-requests", h.ListRideRequestsForMap)
 	g.GET("/nearest-drivers", h.NearestDriversForRequest)
+	g.GET("/nearest-requests", h.NearestRequestsForDriver)
 	g.GET("/drivers/:id/ledger", h.ListDriverLedger)
 	g.GET("/riders", h.ListRiders)
 	g.POST("/drivers/:id/add-balance", h.AddBalance)
@@ -125,6 +128,84 @@ func (h *AdminHandlers) NearestDriversForRequest(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, drivers)
+}
+
+type adminNearestRequest struct {
+	ID         string  `json:"id"`
+	PickupLat  float64 `json:"pickup_lat"`
+	PickupLng  float64 `json:"pickup_lng"`
+	RadiusKm   float64 `json:"radius_km"`
+	ExpiresAt  string  `json:"expires_at"`
+	RiderPhone string  `json:"rider_phone"`
+	DistanceKm float64 `json:"distance_km"`
+}
+
+// NearestRequestsForDriver returns pending ride requests nearest to a driver (GET /admin/nearest-requests?driver_id=).
+// This is used by the admin Live Map "Fetch nearest requests" button.
+func (h *AdminHandlers) NearestRequestsForDriver(c *gin.Context) {
+	if h == nil || h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "db unavailable"})
+		return
+	}
+	driverIDStr := strings.TrimSpace(c.Query("driver_id"))
+	driverID, err := strconv.ParseInt(driverIDStr, 10, 64)
+	if err != nil || driverID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "driver_id query parameter is required"})
+		return
+	}
+	limit := 20
+	if s := strings.TrimSpace(c.Query("limit")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+
+	ctx := c.Request.Context()
+	var lastLat, lastLng sql.NullFloat64
+	if err := h.db.QueryRowContext(ctx, `SELECT last_lat, last_lng FROM drivers WHERE user_id = ?1`, driverID).Scan(&lastLat, &lastLng); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "driver not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load driver location"})
+		return
+	}
+	if !lastLat.Valid || !lastLng.Valid {
+		c.JSON(http.StatusOK, []adminNearestRequest{})
+		return
+	}
+
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT r.id, r.pickup_lat, r.pickup_lng, r.radius_km, COALESCE(r.expires_at,''), COALESCE(u.phone,'')
+		FROM ride_requests r
+		JOIN users u ON u.id = r.rider_user_id
+		WHERE r.status = 'PENDING'
+		  AND r.expires_at > datetime('now')
+		  AND r.pickup_lat IS NOT NULL AND r.pickup_lng IS NOT NULL`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list ride requests"})
+		return
+	}
+	defer rows.Close()
+
+	var out []adminNearestRequest
+	for rows.Next() {
+		var rr adminNearestRequest
+		if err := rows.Scan(&rr.ID, &rr.PickupLat, &rr.PickupLng, &rr.RadiusKm, &rr.ExpiresAt, &rr.RiderPhone); err != nil {
+			continue
+		}
+		rr.DistanceKm = utils.HaversineMeters(lastLat.Float64, lastLng.Float64, rr.PickupLat, rr.PickupLng) / 1000
+		out = append(out, rr)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list ride requests"})
+		return
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DistanceKm < out[j].DistanceKm })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 type addBalanceRequest struct {
