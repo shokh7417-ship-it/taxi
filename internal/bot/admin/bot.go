@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"taxi-mvp/internal/accounting"
 	"taxi-mvp/internal/config"
+	driverbot "taxi-mvp/internal/bot/driver"
+	"taxi-mvp/internal/repositories"
 	"taxi-mvp/internal/services"
 )
 
@@ -219,18 +222,18 @@ func handleApprovalCallback(bot *tgbotapi.BotAPI, cfg *config.Config, db *sql.DB
 		}
 		return
 	}
-	if _, err := db.ExecContext(ctx, `
-		UPDATE drivers
-		SET verification_status = 'rejected',
-		    license_photo_file_id = NULL,
-		    vehicle_doc_file_id = NULL,
-		    application_step = 'license_photo'
-		WHERE user_id = ?1`, driverUserID); err != nil {
-		log.Printf("admin bot: reject driver update error user_id=%d: %v", driverUserID, err)
+	adminRepo := repositories.NewAdminDriverRepository(db)
+	if err := adminRepo.DeleteAndResetDriverApplication(ctx, driverUserID); err != nil {
+		if errors.Is(err, repositories.ErrDriverRejectNotAllowed) {
+			log.Printf("admin bot: reject driver not allowed user_id=%d", driverUserID)
+		} else {
+			log.Printf("admin bot: reject driver delete/reset error user_id=%d: %v", driverUserID, err)
+		}
 		return
 	}
 	if driverTgID != 0 && driverBot != nil {
-		rej := tgbotapi.NewMessage(driverTgID, "❌ Ҳужжатларингиз тасдиқланмади.\nИлтимос, аниқроқ расм юборинг.")
+		rej := tgbotapi.NewMessage(driverTgID, driverbot.DriverApplicationRejectedTelegramText)
+		rej.ReplyMarkup = driverbot.RejectionAfterAdminRefillKeyboard()
 		if _, err := driverBot.Send(rej); err != nil {
 			log.Printf("admin bot: notify rejected driver via driver bot send error user_id=%d: %v", driverUserID, err)
 		}

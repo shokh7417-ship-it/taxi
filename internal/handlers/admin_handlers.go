@@ -11,41 +11,52 @@ import (
 
 	"github.com/gin-gonic/gin"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	driverbot "taxi-mvp/internal/bot/driver"
+	"taxi-mvp/internal/repositories"
 	"taxi-mvp/internal/services"
 )
 
 // AdminHandlers exposes admin HTTP endpoints.
 type AdminHandlers struct {
 	svc       *services.AdminService
+	matchSvc  *services.MatchService
 	driverBot *tgbotapi.BotAPI
 	db        *sql.DB
 }
 
 // NewAdminHandlers creates AdminHandlers. driverBot can be nil; then verify notifications are skipped.
 // db is used for legal monitoring and rider list routes; may be nil (those routes are skipped).
-func NewAdminHandlers(svc *services.AdminService, driverBot *tgbotapi.BotAPI, db *sql.DB) *AdminHandlers {
-	return &AdminHandlers{svc: svc, driverBot: driverBot, db: db}
+// matchSvc can be nil; then GET /admin/nearest-drivers returns 503.
+func NewAdminHandlers(svc *services.AdminService, matchSvc *services.MatchService, driverBot *tgbotapi.BotAPI, db *sql.DB) *AdminHandlers {
+	return &AdminHandlers{svc: svc, matchSvc: matchSvc, driverBot: driverBot, db: db}
 }
 
-// Register registers /admin routes on the given router.
+// Register registers admin HTTP routes on the given router.
+// Mounts the same handlers under /admin, /api/admin, /api/v1/admin, and /v1/admin so dashboards work
+// whether API_BASE is the service origin or an /api-prefixed gateway (same pattern as RegisterAdminLegalRoutes).
 func (h *AdminHandlers) Register(r *gin.Engine) {
 	if h == nil || h.svc == nil {
 		return
 	}
-	g := r.Group("/admin")
-	{
-		g.GET("/drivers", h.ListDrivers)
-		g.GET("/map/drivers", h.ListDriversForMap)
-		g.GET("/map/ride-requests", h.ListRideRequestsForMap)
-		g.GET("/drivers/:id/ledger", h.ListDriverLedger)
-		g.GET("/riders", h.ListRiders)
-		g.POST("/drivers/:id/add-balance", h.AddBalance)
-		g.POST("/drivers/:id/adjust-balance", h.AdjustBalance)
-		g.POST("/drivers/:id/deduct-balance", h.DeductBalance)
-		g.POST("/drivers/:id/verify", h.VerifyDriver)
-		g.GET("/payments", h.ListPayments)
-		g.GET("/dashboard", h.Dashboard)
+	for _, base := range []string{"/admin", "/api/admin", "/api/v1/admin", "/v1/admin"} {
+		g := r.Group(base)
+		h.registerRoutes(g)
 	}
+}
+
+func (h *AdminHandlers) registerRoutes(g *gin.RouterGroup) {
+	g.GET("/drivers", h.ListDrivers)
+	g.GET("/map/drivers", h.ListDriversForMap)
+	g.GET("/map/ride-requests", h.ListRideRequestsForMap)
+	g.GET("/nearest-drivers", h.NearestDriversForRequest)
+	g.GET("/drivers/:id/ledger", h.ListDriverLedger)
+	g.GET("/riders", h.ListRiders)
+	g.POST("/drivers/:id/add-balance", h.AddBalance)
+	g.POST("/drivers/:id/adjust-balance", h.AdjustBalance)
+	g.POST("/drivers/:id/deduct-balance", h.DeductBalance)
+	g.POST("/drivers/:id/verify", h.VerifyDriver)
+	g.GET("/payments", h.ListPayments)
+	g.GET("/dashboard", h.Dashboard)
 }
 
 // ListRiders returns admin rider DTOs (GET /admin/riders).
@@ -92,6 +103,30 @@ func (h *AdminHandlers) ListRideRequestsForMap(c *gin.Context) {
 	c.JSON(http.StatusOK, requests)
 }
 
+// NearestDriversForRequest returns dispatch-eligible drivers nearest to a ride request pickup (GET /admin/nearest-drivers?request_id=).
+func (h *AdminHandlers) NearestDriversForRequest(c *gin.Context) {
+	requestID := strings.TrimSpace(c.Query("request_id"))
+	if requestID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request_id query parameter is required"})
+		return
+	}
+	if h.matchSvc == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "nearest drivers unavailable"})
+		return
+	}
+	drivers, err := h.matchSvc.AdminNearestDispatchDrivers(c.Request.Context(), requestID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "ride request not found"})
+			return
+		}
+		log.Printf("admin nearest-drivers: request_id=%s err=%v", requestID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list nearest drivers"})
+		return
+	}
+	c.JSON(http.StatusOK, drivers)
+}
+
 type addBalanceRequest struct {
 	Amount int64  `json:"amount"` // in smallest currency units (e.g. so'm)
 	Note   string `json:"note"`
@@ -136,9 +171,21 @@ func (h *AdminHandlers) VerifyDriver(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be approved or rejected"})
 		return
 	}
-	if _, err := h.svc.SetDriverVerification(c.Request.Context(), driverID, req.Status); err != nil {
+	telegramID, err := h.svc.SetDriverVerification(c.Request.Context(), driverID, req.Status)
+	if err != nil {
+		if errors.Is(err, repositories.ErrDriverRejectNotAllowed) {
+			c.JSON(http.StatusConflict, gin.H{"error": "driver not found, already approved, or cannot reject"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update verification"})
 		return
+	}
+	if req.Status == "rejected" && h.driverBot != nil && telegramID != 0 {
+		msg := tgbotapi.NewMessage(telegramID, driverbot.DriverApplicationRejectedTelegramText)
+		msg.ReplyMarkup = driverbot.RejectionAfterAdminRefillKeyboard()
+		if _, err := h.driverBot.Send(msg); err != nil {
+			log.Printf("admin VerifyDriver: notify rejected driver telegram_id=%d: %v", telegramID, err)
+		}
 	}
 	c.Status(http.StatusNoContent)
 }

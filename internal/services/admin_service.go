@@ -100,18 +100,25 @@ func (s *AdminService) ListDriverLedger(ctx context.Context, driverID int64, lim
 	return s.ledger.ListByDriver(ctx, driverID, limit)
 }
 
-// SetDriverVerification sets verification_status to "approved" or "rejected". Returns the driver's Telegram ID for notification.
+// SetDriverVerification approves or rejects a driver application. Reject deletes application data and recreates an empty drivers row
+// (same as a fresh signup shell) so the user can restart from /start; approve updates verification_status only.
+// Returns the driver's Telegram ID for notifications.
 func (s *AdminService) SetDriverVerification(ctx context.Context, driverUserID int64, status string) (telegramID int64, err error) {
 	if status != "approved" && status != "rejected" {
 		return 0, nil
 	}
+	if status == "rejected" {
+		if err := s.drivers.DeleteAndResetDriverApplication(ctx, driverUserID); err != nil {
+			return 0, err
+		}
+		telegramID, err = s.drivers.GetDriverTelegramID(ctx, driverUserID)
+		return telegramID, err
+	}
 	if err := s.drivers.UpdateVerificationStatus(ctx, driverUserID, status); err != nil {
 		return 0, err
 	}
-	if status == "approved" {
-		if err := accounting.TryGrantSignupPromoOnce(ctx, s.db, driverUserID); err != nil {
-			log.Printf("admin_service: signup promo on approve user_id=%d: %v", driverUserID, err)
-		}
+	if err := accounting.TryGrantSignupPromoOnce(ctx, s.db, driverUserID); err != nil {
+		log.Printf("admin_service: signup promo on approve user_id=%d: %v", driverUserID, err)
 	}
 	telegramID, err = s.drivers.GetDriverTelegramID(ctx, driverUserID)
 	return telegramID, err
@@ -328,6 +335,7 @@ type AdminMapRideRequest struct {
 	PickupLat  float64 `json:"pickup_lat"`
 	PickupLng  float64 `json:"pickup_lng"`
 	Status     string  `json:"status"`
+	RiderPhone string  `json:"rider_phone"`
 }
 
 // ListActiveDriversForMap returns only drivers with valid coordinates and active live location.
@@ -360,10 +368,11 @@ func (s *AdminService) ListActiveRideRequestsForMap(ctx context.Context) ([]Admi
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, pickup_lat, pickup_lng, status
-		FROM ride_requests
-		WHERE pickup_lat IS NOT NULL AND pickup_lng IS NOT NULL
-		  AND status = ?1`,
+		SELECT r.id, r.pickup_lat, r.pickup_lng, r.status, COALESCE(u.phone, '')
+		FROM ride_requests r
+		JOIN users u ON u.id = r.rider_user_id
+		WHERE r.pickup_lat IS NOT NULL AND r.pickup_lng IS NOT NULL
+		  AND r.status = ?1`,
 		domain.RequestStatusPending)
 	if err != nil {
 		return nil, err
@@ -372,7 +381,7 @@ func (s *AdminService) ListActiveRideRequestsForMap(ctx context.Context) ([]Admi
 	var out []AdminMapRideRequest
 	for rows.Next() {
 		var r AdminMapRideRequest
-		if err := rows.Scan(&r.ID, &r.PickupLat, &r.PickupLng, &r.Status); err != nil {
+		if err := rows.Scan(&r.ID, &r.PickupLat, &r.PickupLng, &r.Status, &r.RiderPhone); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

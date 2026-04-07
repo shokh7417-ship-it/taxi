@@ -3,10 +3,15 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 
 	"taxi-mvp/internal/models"
 )
+
+// ErrDriverRejectNotAllowed is returned when rejecting an application for a missing driver row or an already-approved driver.
+var ErrDriverRejectNotAllowed = errors.New("driver application cannot be rejected: not found or already approved")
 
 // AdminDriverRepository defines read/write operations for admin driver balance views.
 type AdminDriverRepository interface {
@@ -16,6 +21,9 @@ type AdminDriverRepository interface {
 	SetDriverBalance(ctx context.Context, id int64, newBalance int64) error
 	UpdateVerificationStatus(ctx context.Context, driverUserID int64, status string) error
 	GetDriverTelegramID(ctx context.Context, driverUserID int64) (int64, error)
+	// DeleteAndResetDriverApplication removes the drivers row for non-approved applications (CASCADE cleans ledger/payments),
+	// then inserts a fresh drivers shell so the user can restart the application from /start.
+	DeleteAndResetDriverApplication(ctx context.Context, driverUserID int64) error
 }
 
 type adminDriverRepo struct {
@@ -161,15 +169,44 @@ func (r *adminDriverRepo) SetDriverBalance(ctx context.Context, id int64, newBal
 	return err
 }
 
-// UpdateVerificationStatus sets verification_status. For "rejected", also clears document file_ids and sets application_step to restart doc upload.
+// UpdateVerificationStatus sets verification_status (used for approval).
 func (r *adminDriverRepo) UpdateVerificationStatus(ctx context.Context, driverUserID int64, status string) error {
-	if status == "rejected" {
-		_, err := r.db.ExecContext(ctx, `
-			UPDATE drivers SET verification_status = 'rejected', license_photo_file_id = NULL, vehicle_doc_file_id = NULL, application_step = 'license_photo', application_admin_sent = 0 WHERE user_id = ?1`, driverUserID)
-		return err
-	}
 	_, err := r.db.ExecContext(ctx, `UPDATE drivers SET verification_status = ?1 WHERE user_id = ?2`, status, driverUserID)
 	return err
+}
+
+// DeleteAndResetDriverApplication implements AdminDriverRepository.DeleteAndResetDriverApplication.
+func (r *adminDriverRepo) DeleteAndResetDriverApplication(ctx context.Context, driverUserID int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var status sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT verification_status FROM drivers WHERE user_id = ?1`, driverUserID).Scan(&status); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrDriverRejectNotAllowed
+		}
+		return err
+	}
+	st := strings.TrimSpace(status.String)
+	if status.Valid && strings.EqualFold(st, "approved") {
+		return ErrDriverRejectNotAllowed
+	}
+
+	// Delete full application row (CASCADE: driver_ledger, payments, etc.). Do not rely on RowsAffected():
+	// some SQLite/libSQL drivers report 0 incorrectly for DELETE.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM drivers WHERE user_id = ?1`, driverUserID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO drivers (user_id, is_active) VALUES (?1, 0)`, driverUserID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetDriverTelegramID returns the Telegram user id for the driver (users.telegram_id).

@@ -20,6 +20,7 @@ import (
 	"taxi-mvp/internal/domain"
 	"taxi-mvp/internal/driverloc"
 	"taxi-mvp/internal/legal"
+	"taxi-mvp/internal/repositories"
 	"taxi-mvp/internal/services"
 	"taxi-mvp/internal/utils"
 )
@@ -30,8 +31,11 @@ var liveLocationStepsPNG []byte
 const (
 	btnLiveLocation     = driverloc.BtnShareLiveLocation
 	btnPending          = "⏳ Тасдиқлаш кутилмоқда"
-	cbAccept            = "accept:"
-	cbDriverAcceptTerms = "driver_accept_terms"
+	btnRefillApplication = "📝 Аризани қайта тўлдириш"
+	cbAccept             = "accept:"
+	cbDriverAcceptTerms  = "driver_accept_terms"
+	// cbDriverRefillApplication: after admin rejection, user taps to restart application (same as /start).
+	cbDriverRefillApplication = "driver_refill_app"
 
 	resumeDriverAccept = "driver_accept"
 	// resumeDriverRelive: driver was sharing live location when legal blocked them; user must re-share live in Telegram.
@@ -41,6 +45,9 @@ const (
 	liveLocationActiveSeconds = 90
 	// Onboarding: shown when driver completes registration (live location = online; no separate online button).
 	onboardingMessage = "🚕 YettiQanot ҳайдовчи\n\nПастдаги «" + driverloc.BtnShareLiveLocation + "» тугмаси фақат қўлланмани кўрсатади (жонли локацияни ўзи ёқмайди). Жонли локацияни 📎 → Location → «Share Live Location» орқали уланг.\n\nЖонли локация ёқилгунча сиз офлайн ҳисобланасиз."
+
+	// DriverApplicationRejectedTelegramText is sent when an admin rejects the application (HTTP API + bots).
+	DriverApplicationRejectedTelegramText = "❌ Админ сизнинг ҳайдовчи аризангизни рад этди.\n\nКейинги қадам: қуйидаги тугмани босинг ёки /start юборинг."
 
 	// Welcome promo message: shown once after registration (same copy as approval notifier / accounting constant).
 	welcomeBonusMessage = accounting.DriverNewPromoProgramMessage
@@ -463,6 +470,15 @@ func SendKeyboardForDriver(bot *tgbotapi.BotAPI, db *sql.DB, chatID, userID int6
 	if _, err := bot.Send(m); err != nil {
 		log.Printf("driver: send keyboard for driver user_id=%d: %v", userID, err)
 	}
+}
+
+// RejectionAfterAdminRefillKeyboard is the inline keyboard for the post-rejection Telegram message (admin API + bots).
+func RejectionAfterAdminRefillKeyboard() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(btnRefillApplication, cbDriverRefillApplication),
+		),
+	)
 }
 
 func driverKeyboardForVerificationPending() tgbotapi.ReplyKeyboardMarkup {
@@ -1568,6 +1584,14 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 	telegramID := q.From.ID
 	data := q.Data
 
+	if data == cbDriverRefillApplication {
+		if q.ID != "" {
+			_, _ = bot.Request(tgbotapi.NewCallback(q.ID, ""))
+		}
+		handleStart(bot, db, cfg, chatID, telegramID, nil)
+		return
+	}
+
 	if data == cbDriverAcceptTerms {
 		ctx := context.Background()
 		var userID int64
@@ -1714,13 +1738,15 @@ func handleCallback(bot *tgbotapi.BotAPI, db *sql.DB, cfg *config.Config, matchS
 			sendWelcomeBonusMessageIfNeeded(bot, db, driverTgID, driverUserID)
 			_, _ = db.ExecContext(ctx, `UPDATE drivers SET approval_notified = 1 WHERE user_id = ?1`, driverUserID)
 		case strings.HasPrefix(data, "reject_driver_"):
-			if _, err := db.ExecContext(ctx, `UPDATE drivers SET verification_status = 'rejected', license_photo_file_id = NULL, vehicle_doc_file_id = NULL, application_step = 'license_photo', application_admin_sent = 0 WHERE user_id = ?1 AND verification_status != 'approved'`, driverUserID); err != nil {
-				log.Printf("driver: reject driver update error user_id=%d: %v", driverUserID, err)
+			adminRepo := repositories.NewAdminDriverRepository(db)
+			if err := adminRepo.DeleteAndResetDriverApplication(ctx, driverUserID); err != nil {
+				log.Printf("driver: reject driver delete/reset user_id=%d: %v", driverUserID, err)
 			} else {
-				log.Printf("driver: driver rejected by admin user_id=%d", driverUserID)
+				log.Printf("driver: driver application rejected and reset user_id=%d", driverUserID)
 				var driverTgID int64
 				if err := db.QueryRowContext(ctx, `SELECT telegram_id FROM users WHERE id = ?1`, driverUserID).Scan(&driverTgID); err == nil && driverTgID != 0 {
-					msg := tgbotapi.NewMessage(driverTgID, "❌ Ҳужжатларингиз тасдиқланмади.\nИлтимос, аниқроқ расм юборинг.")
+					msg := tgbotapi.NewMessage(driverTgID, DriverApplicationRejectedTelegramText)
+					msg.ReplyMarkup = RejectionAfterAdminRefillKeyboard()
 					if _, err := bot.Send(msg); err != nil {
 						log.Printf("driver: notify rejected driver send error user_id=%d: %v", driverUserID, err)
 					}

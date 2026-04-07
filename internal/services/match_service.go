@@ -575,3 +575,104 @@ func (s *MatchService) NotifyDriverOfPendingRequests(ctx context.Context, driver
 		time.Sleep(1 * time.Second)
 	}
 }
+
+// AdminNearestDispatchDriver is one driver eligible for priority dispatch to this request, with distance from pickup.
+type AdminNearestDispatchDriver struct {
+	ID         int64   `json:"id"`
+	TelegramID int64   `json:"telegram_id"`
+	DistanceKm float64 `json:"distance_km"`
+	LastLat    float64 `json:"last_lat"`
+	LastLng    float64 `json:"last_lng"`
+}
+
+// AdminNearestDispatchDrivers returns drivers that match the same eligibility rules as runPriorityDispatch
+// (live location freshness, balance unless InfiniteDriverBalance, legal, profile fields, grid neighborhood,
+// no active trip), within ride_requests.radius_km, sorted by distance ascending.
+func (s *MatchService) AdminNearestDispatchDrivers(ctx context.Context, requestID string) ([]AdminNearestDispatchDriver, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("match service unavailable")
+	}
+	var pickupLat, pickupLng, radiusKm float64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT pickup_lat, pickup_lng, radius_km FROM ride_requests WHERE id = ?1`, requestID).Scan(&pickupLat, &pickupLng, &radiusKm)
+	if err != nil {
+		return nil, err
+	}
+	gridIDs := utils.NeighborGridIDs(pickupLat, pickupLng)
+	locationFreshSinceStr := time.Now().Add(-time.Duration(driverLocationFreshnessSeconds) * time.Second).UTC().Format("2006-01-02 15:04:05")
+	balanceCond := ""
+	if s.cfg == nil || !s.cfg.InfiniteDriverBalance {
+		balanceCond = " AND d.balance > 0"
+	}
+	placeholders := "?"
+	args := []interface{}{locationFreshSinceStr, locationFreshSinceStr}
+	for i := 1; i < len(gridIDs); i++ {
+		placeholders += ",?"
+	}
+	for _, g := range gridIDs {
+		args = append(args, g)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.user_id, u.telegram_id, d.last_lat, d.last_lng
+		FROM drivers d JOIN users u ON u.id = d.user_id
+		WHERE COALESCE(d.live_location_active, 0) = 1`+balanceCond+`
+		  AND d.verification_status = 'approved'
+		  AND `+legal.SQLDriverDispatchLegalOK+`
+		  AND d.last_live_location_at IS NOT NULL AND d.last_live_location_at >= ?2
+		  AND d.last_seen_at IS NOT NULL AND d.last_seen_at >= ?1
+		  AND d.last_lat IS NOT NULL AND d.last_lng IS NOT NULL
+		  AND d.phone IS NOT NULL AND d.phone != ''
+		  AND d.car_type IS NOT NULL AND d.car_type != ''
+		  AND d.color IS NOT NULL AND d.color != ''
+		  AND d.plate IS NOT NULL AND d.plate != ''
+		  AND (d.grid_id IN (`+placeholders+`) OR d.grid_id IS NULL)
+		  AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.driver_user_id = d.user_id AND t.status IN ('WAITING','ARRIVED','STARTED'))`,
+		args...)
+	if err != nil {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT d.user_id, u.telegram_id, d.last_lat, d.last_lng
+			FROM drivers d JOIN users u ON u.id = d.user_id
+			WHERE COALESCE(d.live_location_active, 0) = 1`+balanceCond+`
+			  AND d.verification_status = 'approved'
+			  AND `+legal.SQLDriverDispatchLegalOK+`
+			  AND d.last_live_location_at IS NOT NULL AND d.last_live_location_at >= ?2
+			  AND d.last_seen_at IS NOT NULL AND d.last_seen_at >= ?1
+			  AND d.last_lat IS NOT NULL AND d.last_lng IS NOT NULL
+			  AND (d.grid_id IN (`+placeholders+`) OR d.grid_id IS NULL)
+			  AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.driver_user_id = d.user_id AND t.status IN ('WAITING','ARRIVED','STARTED'))`,
+			args...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []driverCandidate
+	for rows.Next() {
+		var uID int64
+		var telegramID int64
+		var lat, lng float64
+		if err := rows.Scan(&uID, &telegramID, &lat, &lng); err != nil {
+			continue
+		}
+		distKm := utils.HaversineMeters(pickupLat, pickupLng, lat, lng) / 1000
+		if distKm > radiusKm {
+			continue
+		}
+		candidates = append(candidates, driverCandidate{UserID: uID, TelegramID: telegramID, LastLat: lat, LastLng: lng, DistKm: distKm})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].DistKm < candidates[j].DistKm })
+	out := make([]AdminNearestDispatchDriver, 0, len(candidates))
+	for _, c := range candidates {
+		out = append(out, AdminNearestDispatchDriver{
+			ID:         c.UserID,
+			TelegramID: c.TelegramID,
+			DistanceKm: c.DistKm,
+			LastLat:    c.LastLat,
+			LastLng:    c.LastLng,
+		})
+	}
+	return out, nil
+}
