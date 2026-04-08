@@ -24,13 +24,14 @@ type AdminHandlers struct {
 	matchSvc  *services.MatchService
 	driverBot *tgbotapi.BotAPI
 	db        *sql.DB
+	adminToken string
 }
 
 // NewAdminHandlers creates AdminHandlers. driverBot can be nil; then verify notifications are skipped.
 // db is used for legal monitoring and rider list routes; may be nil (those routes are skipped).
 // matchSvc can be nil; then GET /admin/nearest-drivers returns 503.
-func NewAdminHandlers(svc *services.AdminService, matchSvc *services.MatchService, driverBot *tgbotapi.BotAPI, db *sql.DB) *AdminHandlers {
-	return &AdminHandlers{svc: svc, matchSvc: matchSvc, driverBot: driverBot, db: db}
+func NewAdminHandlers(svc *services.AdminService, matchSvc *services.MatchService, driverBot *tgbotapi.BotAPI, db *sql.DB, adminToken string) *AdminHandlers {
+	return &AdminHandlers{svc: svc, matchSvc: matchSvc, driverBot: driverBot, db: db, adminToken: strings.TrimSpace(adminToken)}
 }
 
 // Register registers admin HTTP routes on the given router.
@@ -42,6 +43,17 @@ func (h *AdminHandlers) Register(r *gin.Engine) {
 	}
 	for _, base := range []string{"/admin", "/api/admin", "/api/v1/admin", "/v1/admin"} {
 		g := r.Group(base)
+		if h.adminToken != "" {
+			g.Use(func(c *gin.Context) {
+				authz := strings.TrimSpace(c.GetHeader("Authorization"))
+				const prefix = "Bearer "
+				if !strings.HasPrefix(authz, prefix) || strings.TrimSpace(strings.TrimPrefix(authz, prefix)) != h.adminToken {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "admin_auth_required"})
+					return
+				}
+				c.Next()
+			})
+		}
 		h.registerRoutes(g)
 	}
 }
@@ -61,6 +73,15 @@ func (h *AdminHandlers) registerRoutes(g *gin.RouterGroup) {
 	g.POST("/drivers/:id/verify", h.VerifyDriver)
 	g.GET("/payments", h.ListPayments)
 	g.GET("/dashboard", h.Dashboard)
+}
+
+func queryFirstNonEmpty(c *gin.Context, keys ...string) string {
+	for _, k := range keys {
+		if v := strings.TrimSpace(c.Query(k)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ListRiders returns admin rider DTOs (GET /admin/riders).
@@ -109,7 +130,7 @@ func (h *AdminHandlers) ListRideRequestsForMap(c *gin.Context) {
 
 // NearestDriversForRequest returns dispatch-eligible drivers nearest to a ride request pickup (GET /admin/nearest-drivers?request_id=).
 func (h *AdminHandlers) NearestDriversForRequest(c *gin.Context) {
-	requestID := strings.TrimSpace(c.Query("request_id"))
+	requestID := queryFirstNonEmpty(c, "request_id", "ride_request_id", "id", "requestId")
 	if requestID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "request_id query parameter is required"})
 		return
@@ -160,14 +181,16 @@ func (h *AdminHandlers) OfferRideRequestToDriver(c *gin.Context) {
 		case errors.Is(err, services.ErrAdminOfferUnknownRequest), errors.Is(err, services.ErrAdminOfferUnknownDriver):
 			c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "unknown request_id or driver_id"})
 		case errors.Is(err, services.ErrAdminOfferRequestNotAvail):
-			c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "request not available"})
+			c.JSON(http.StatusConflict, gin.H{"error": "request_not_available"})
+		case errors.Is(err, services.ErrAdminOfferDriverNotElig):
+			c.JSON(http.StatusConflict, gin.H{"error": "driver_not_eligible"})
 		default:
 			log.Printf("admin offer request=%s driver=%d err=%v", requestID, body.DriverID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "failed to send offer"})
 		}
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "sent": true, "request_id": requestID, "driver_id": body.DriverID})
+	c.JSON(http.StatusCreated, gin.H{"ok": true, "status": "offered", "request_id": requestID, "driver_id": body.DriverID})
 }
 
 type adminNearestRequest struct {
@@ -187,7 +210,7 @@ func (h *AdminHandlers) NearestRequestsForDriver(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "db unavailable"})
 		return
 	}
-	driverIDStr := strings.TrimSpace(c.Query("driver_id"))
+	driverIDStr := queryFirstNonEmpty(c, "driver_id", "id", "driverId")
 	driverID, err := strconv.ParseInt(driverIDStr, 10, 64)
 	if err != nil || driverID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "driver_id query parameter is required"})

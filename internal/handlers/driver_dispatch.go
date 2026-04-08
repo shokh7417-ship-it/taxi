@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -150,6 +151,10 @@ func DriverAcceptRequest(db *sql.DB, assignSvc *services.AssignmentService, trip
 		}
 		assigned, tripID, err := assignSvc.TryAssign(ctx, req.RequestID, driverID)
 		if err != nil {
+			if errors.Is(err, services.ErrOfferNotFound) {
+				c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "offer_not_found", "request_id": req.RequestID})
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error(), "request_id": req.RequestID})
 			return
 		}

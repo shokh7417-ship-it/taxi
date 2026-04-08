@@ -13,6 +13,7 @@ import (
 	"taxi-mvp/internal/repositories"
 	"taxi-mvp/internal/services"
 	"taxi-mvp/internal/ws"
+	"strings"
 )
 
 // New creates a Gin engine with API routes and optional webapp static files.
@@ -26,7 +27,7 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	// Avoid gin's default access logger which may include full query strings
 	// (e.g. Telegram init_data on websocket requests), causing large stdout/stderr.
 	r.Use(gin.Recovery())
-	r.Use(corsMiddleware())
+	r.Use(corsMiddleware(cfg))
 	r.Use(func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
@@ -91,16 +92,38 @@ func New(db *sql.DB, cfg *config.Config, tripSvc *services.TripService, matchSvc
 	paymentRepo := repositories.NewPaymentRepository(db)
 	tripStatsRepo := repositories.NewTripStatsRepository(db)
 	adminSvc := services.NewAdminService(db, adminDriverRepo, paymentRepo, tripStatsRepo)
-	adminHandlers := handlers.NewAdminHandlers(adminSvc, matchSvc, driverBot, db)
+	adminHandlers := handlers.NewAdminHandlers(adminSvc, matchSvc, driverBot, db, cfg.AdminAPIToken)
 	adminHandlers.Register(r)
 	// Legal admin API for dashboards (always mount when DB is available; do not depend on handler wiring).
 	handlers.RegisterAdminLegalRoutes(r, db)
 	return r
 }
 
-func corsMiddleware() gin.HandlerFunc {
+func corsMiddleware(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := c.GetHeader("Origin")
+		allow := "*"
+		if cfg != nil {
+			allow = strings.TrimSpace(cfg.AdminDashboardOrigin)
+		}
+		if allow == "" {
+			allow = "*"
+		}
+		if allow == "*" || origin == "" {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", allow)
+		} else {
+			allowed := false
+			for _, o := range strings.Split(allow, ",") {
+				if strings.TrimSpace(o) == origin {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
+				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+				c.Writer.Header().Set("Vary", "Origin")
+			}
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Telegram-Init-Data, X-Driver-Id")
 		if c.Request.Method == "OPTIONS" {

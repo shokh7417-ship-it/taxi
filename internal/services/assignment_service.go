@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -16,6 +17,11 @@ import (
 )
 
 const assignmentLogErrMaxChars = 200
+
+var (
+	// ErrOfferNotFound means the driver tried to accept a request they were not offered.
+	ErrOfferNotFound = errors.New("offer not found")
+)
 
 func assignmentTrunc(s string, max int) string {
 	if max <= 0 || len(s) <= max {
@@ -52,6 +58,18 @@ func NewAssignmentService(db *sql.DB, riderBot, driverBot *tgbotapi.BotAPI, cfg 
 func (s *AssignmentService) TryAssign(ctx context.Context, requestID string, driverUserID int64) (assigned bool, tripID string, err error) {
 	if !legal.NewService(s.db).DriverHasActiveLegal(ctx, driverUserID) {
 		return false, "", fmt.Errorf("assignment: driver %d missing active legal acceptances", driverUserID)
+	}
+	// Require that an offer exists for this (request, driver) pair. This prevents arbitrary accepts.
+	var offerExists int
+	if e := s.db.QueryRowContext(ctx, `
+		SELECT 1 FROM request_notifications
+		WHERE request_id = ?1 AND driver_user_id = ?2 AND status = ?3
+		LIMIT 1`,
+		requestID, driverUserID, domain.NotificationStatusSent).Scan(&offerExists); e != nil {
+		if e == sql.ErrNoRows {
+			return false, "", ErrOfferNotFound
+		}
+		return false, "", e
 	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE ride_requests
