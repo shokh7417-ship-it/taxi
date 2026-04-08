@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -139,7 +140,13 @@ func (h *AdminHandlers) NearestDriversForRequest(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "nearest drivers unavailable"})
 		return
 	}
-	drivers, err := h.matchSvc.AdminNearestDispatchDrivers(c.Request.Context(), requestID)
+	var maxDistKmPtr *float64
+	if s := queryFirstNonEmpty(c, "radius_km", "max_distance_km", "radius"); s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 && !math.IsInf(v, 0) && !math.IsNaN(v) {
+			maxDistKmPtr = &v
+		}
+	}
+	drivers, err := h.matchSvc.AdminNearestDispatchDrivers(c.Request.Context(), requestID, maxDistKmPtr)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "ride request not found"})
