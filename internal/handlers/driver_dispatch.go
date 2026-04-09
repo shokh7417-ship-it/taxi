@@ -77,7 +77,8 @@ func DriverAvailableRequests(db *sql.DB, cfg *config.Config) gin.HandlerFunc {
 		}
 		defer rows.Close()
 
-		var offers []DriverAvailableOffer
+		// Non-nil slice so JSON encodes as [] not null (Flutter/clients expect arrays per API contract).
+		offers := make([]DriverAvailableOffer, 0)
 		for rows.Next() {
 			var o DriverAvailableOffer
 			if err := rows.Scan(&o.RequestID, &o.PickupLat, &o.PickupLng, &o.RadiusKm, &o.ExpiresAt); err != nil {

@@ -152,7 +152,7 @@ Driver routes use **`tryDriverID`** then **`RequireDriverAuth`** (Telegram initD
 | `GET` | `/driver/referral-link` | JSON `{ "referral_link": "..." }` |
 | `GET` | `/driver/promo-program` | Signup + first-3-trip promo progress + `promo_balance` |
 | `GET` | `/driver/referral-status` | If referred: inviter id, finished trip count, threshold 3, reward granted flag |
-| `GET` | `/driver/available-requests` | Optional **`assigned_trip`** (`trip_id`, `status`); queue arrays **`available_requests`**, **`requests`**, **`pending_requests`**, **`queue`**, **`orders`**, **`jobs`** (same items; client may merge/dedupe by `request_id`) |
+| `GET` | `/driver/available-requests` | Optional **`assigned_trip`** (`trip_id`, `status`) or **`null`** if none. Queue keys **`available_requests`**, **`requests`**, **`pending_requests`**, **`queue`**, **`orders`**, **`jobs`** are **always JSON arrays** (`[]` when empty, never `null`); contents are the same list (duplicate keys for legacy clients); merge/dedupe by **`request_id`**. Example empty body: `{"assigned_trip":null,"available_requests":[],"requests":[],"pending_requests":[],"queue":[],"orders":[],"jobs":[]}`. |
 | `POST` | `/driver/accept-request` | Body **`request_id`** (accept offer) and/or **`trip_id`** (idempotent if already assigned). Uses same **`TryAssign`** as driver bot. **409** if request taken/expired |
 
 ### Legal (Mini App)
