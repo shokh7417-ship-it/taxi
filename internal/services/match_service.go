@@ -300,6 +300,16 @@ func (s *MatchService) runPriorityDispatch(ctx context.Context, requestID string
 	for _, g := range gridIDs {
 		args = append(args, g)
 	}
+	// With HTTP live location, Flutter/native drivers may not have full profile rows yet; omit strict
+	// phone/car/plate filters so dispatch can still create request_notifications (polling + Telegram send).
+	dispatchProfileCond := `
+		  AND d.phone IS NOT NULL AND d.phone != ''
+		  AND d.car_type IS NOT NULL AND d.car_type != ''
+		  AND d.color IS NOT NULL AND d.color != ''
+		  AND d.plate IS NOT NULL AND d.plate != ''`
+	if s.cfg != nil && s.cfg.EnableDriverHTTPLiveLocation {
+		dispatchProfileCond = ""
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.user_id, u.telegram_id, d.last_lat, d.last_lng
 		FROM drivers d JOIN users u ON u.id = d.user_id
@@ -308,11 +318,7 @@ func (s *MatchService) runPriorityDispatch(ctx context.Context, requestID string
 		  AND `+legal.SQLDriverDispatchLegalOK+`
 		  AND d.last_live_location_at IS NOT NULL AND d.last_live_location_at >= ?2
 		  AND d.last_seen_at IS NOT NULL AND d.last_seen_at >= ?1
-		  AND d.last_lat IS NOT NULL AND d.last_lng IS NOT NULL
-		  AND d.phone IS NOT NULL AND d.phone != ''
-		  AND d.car_type IS NOT NULL AND d.car_type != ''
-		  AND d.color IS NOT NULL AND d.color != ''
-		  AND d.plate IS NOT NULL AND d.plate != ''
+		  AND d.last_lat IS NOT NULL AND d.last_lng IS NOT NULL`+dispatchProfileCond+`
 		  AND (d.grid_id IN (`+placeholders+`) OR d.grid_id IS NULL)
 		  AND NOT EXISTS (SELECT 1 FROM trips t WHERE t.driver_user_id = d.user_id AND t.status IN ('WAITING','ARRIVED','STARTED'))`,
 		args...)
@@ -472,8 +478,10 @@ func (s *MatchService) BroadcastRequest(ctx context.Context, requestID string) e
 }
 
 // PulseDriverOnlineFromHTTP marks an eligible driver online and triggers NotifyDriverOfPendingRequests when
-// ENABLE_DRIVER_HTTP_LIVE_LOCATION is used with POST /driver/location. Same DB gates as dispatch (approved, legal, balance, profile fields).
-// No-op if the driver already has an active trip or fails eligibility. Does not change Telegram live-location behavior when the flag is off.
+// ENABLE_DRIVER_HTTP_LIVE_LOCATION is used with POST /driver/location. Only called from that HTTP path (never from Telegram bots).
+// Eligibility matches NotifyDriverOfPendingRequests (approved, legal, lat/lng, balance) — not the stricter grid-dispatch
+// profile (phone/car/plate), so Flutter/native clients still get request_notifications + polling without filling every profile field.
+// Broadcast dispatch for new rider requests still uses the full candidate rules in runPriorityDispatch.
 func (s *MatchService) PulseDriverOnlineFromHTTP(ctx context.Context, driverUserID int64) {
 	if s == nil || s.db == nil {
 		return
@@ -493,12 +501,12 @@ func (s *MatchService) PulseDriverOnlineFromHTTP(ctx context.Context, driverUser
 	err := s.db.QueryRowContext(ctx, `
 		SELECT d.user_id FROM drivers d
 		WHERE d.user_id = ?1 AND d.verification_status = 'approved' AND `+legal.SQLDriverDispatchLegalOK+`
-		AND d.phone IS NOT NULL AND d.phone != ''
-		AND d.car_type IS NOT NULL AND d.car_type != ''
-		AND d.color IS NOT NULL AND d.color != ''
-		AND d.plate IS NOT NULL AND d.plate != ''`+balanceCond,
+		AND d.last_lat IS NOT NULL AND d.last_lng IS NOT NULL`+balanceCond,
 		driverUserID).Scan(&uid)
 	if err != nil {
+		if s.cfg != nil && s.cfg.DispatchDebug {
+			log.Printf("dispatch_debug: pulse_http driver=%d skipped (eligibility): %v", driverUserID, truncateLog(err.Error(), logMaxChars))
+		}
 		return
 	}
 	nowStr := time.Now().UTC().Format("2006-01-02 15:04:05")

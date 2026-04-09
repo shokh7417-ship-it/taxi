@@ -3,15 +3,29 @@ package handlers
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"taxi-mvp/internal/auth"
+	"taxi-mvp/internal/config"
 	"taxi-mvp/internal/domain"
+	"taxi-mvp/internal/legal"
 	"taxi-mvp/internal/services"
 	"taxi-mvp/internal/utils"
 )
+
+// liveLocationFreshSeconds matches MatchService dispatch: last_live_location_at must be within this window.
+const liveLocationFreshSeconds = 90
+
+func bool01(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
 
 // DriverAcceptRequestBody is accepted for POST /driver/accept-request. At least one of trip_id or request_id should be set.
 type DriverAcceptRequestBody struct {
@@ -37,7 +51,7 @@ type DriverAssignedTripStub struct {
 }
 
 // DriverAvailableRequests returns pending offers (request_notifications SENT + PENDING request) and optional active trip stub.
-func DriverAvailableRequests(db *sql.DB) gin.HandlerFunc {
+func DriverAvailableRequests(db *sql.DB, cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		u := auth.UserFromContext(c.Request.Context())
 		if u == nil || u.Role != domain.RoleDriver {
@@ -97,6 +111,112 @@ func DriverAvailableRequests(db *sql.DB) gin.HandlerFunc {
 			"queue":              offers,
 			"orders":             offers,
 			"jobs":               offers,
+		}
+
+		// Debug: explain why queue is empty for a specific driver (without changing Telegram flows).
+		if cfg != nil && cfg.DriverAvailableRequestsDebug && len(offers) == 0 {
+			if cfg.DriverAvailableRequestsDebugDriverID == 0 || cfg.DriverAvailableRequestsDebugDriverID == driverID {
+				// Driver row snapshot
+				var (
+					isActive, manualOffline, liveLocationActive int
+					ver                                         sql.NullString
+					lastSeenAt, lastLiveAt                      sql.NullString
+					promoBal, cashBal, balance                  sql.NullInt64
+				)
+				_ = db.QueryRowContext(ctx, `
+					SELECT COALESCE(is_active,0), COALESCE(manual_offline,0), COALESCE(live_location_active,0),
+					       verification_status, last_seen_at, last_live_location_at,
+					       COALESCE(promo_balance,0), COALESCE(cash_balance,0), COALESCE(balance,0)
+					FROM drivers WHERE user_id = ?1`, driverID).
+					Scan(&isActive, &manualOffline, &liveLocationActive, &ver, &lastSeenAt, &lastLiveAt, &promoBal, &cashBal, &balance)
+
+				// Offer counters
+				var notifSent, notifAny int
+				_ = db.QueryRowContext(ctx, `SELECT COUNT(1) FROM request_notifications WHERE driver_user_id = ?1 AND status = ?2`,
+					driverID, domain.NotificationStatusSent).Scan(&notifSent)
+				_ = db.QueryRowContext(ctx, `SELECT COUNT(1) FROM request_notifications WHERE driver_user_id = ?1`,
+					driverID).Scan(&notifAny)
+
+				// Pending requests overall
+				var pending int
+				_ = db.QueryRowContext(ctx, `SELECT COUNT(1) FROM ride_requests WHERE status = ?1 AND expires_at > datetime('now')`,
+					domain.RequestStatusPending).Scan(&pending)
+
+				// Eligibility “reasons”
+				reasons := make([]string, 0, 8)
+				if pending == 0 {
+					reasons = append(reasons, "no_pending_requests")
+				}
+				if notifSent == 0 {
+					reasons = append(reasons, "no_sent_offers_for_driver")
+				}
+				if notifAny == 0 {
+					reasons = append(reasons, "no_request_notifications_rows_for_driver")
+				}
+				if strings.TrimSpace(ver.String) != "approved" {
+					reasons = append(reasons, "driver_not_approved")
+				}
+				if isActive != 1 {
+					reasons = append(reasons, "driver_is_active=0")
+				}
+				if manualOffline == 1 {
+					reasons = append(reasons, "driver_manual_offline=1")
+				}
+				if liveLocationActive != 1 {
+					reasons = append(reasons, "live_location_active=0")
+				}
+				if !cfg.EnableDriverHTTPLiveLocation {
+					reasons = append(reasons, "enable_http_live_location_off")
+				}
+				liveFresh := false
+				if lastLiveAt.Valid && strings.TrimSpace(lastLiveAt.String) != "" {
+					if t, err := time.ParseInLocation("2006-01-02 15:04:05", lastLiveAt.String, time.UTC); err == nil {
+						liveFresh = time.Since(t) <= time.Duration(liveLocationFreshSeconds)*time.Second
+					}
+				}
+				if liveLocationActive == 1 && !liveFresh {
+					reasons = append(reasons, "live_location_stale")
+				}
+				if !cfg.InfiniteDriverBalance && balance.Valid && balance.Int64 <= 0 {
+					reasons = append(reasons, "balance_zero_dispatch_ineligible")
+				}
+				if !legal.NewService(db).DriverHasActiveLegal(ctx, driverID) {
+					reasons = append(reasons, "legal_not_accepted")
+				}
+				seenFresh := false
+				if lastSeenAt.Valid && strings.TrimSpace(lastSeenAt.String) != "" {
+					if t, err := time.ParseInLocation("2006-01-02 15:04:05", lastSeenAt.String, time.UTC); err == nil {
+						seenFresh = time.Since(t) <= time.Duration(cfg.DriverSeenSeconds)*time.Second
+					}
+				}
+				if !seenFresh {
+					reasons = append(reasons, "driver_not_seen_recently")
+				}
+
+				log.Printf(
+					"driver_available_requests_debug driver_id=%d enable_http_live=%v infinite_balance=%v driver_seen_seconds=%d live_fresh_seconds=%d pending_requests=%d notif_sent=%d notif_any=%d is_active=%d manual_offline=%d live_location_active=%d live_fresh=%d ver=%q last_seen_at=%q last_live_at=%q promo=%d cash=%d balance=%d assigned_trip=%v reasons=%s",
+					driverID,
+					cfg.EnableDriverHTTPLiveLocation,
+					cfg.InfiniteDriverBalance,
+					cfg.DriverSeenSeconds,
+					liveLocationFreshSeconds,
+					pending,
+					notifSent,
+					notifAny,
+					isActive,
+					manualOffline,
+					liveLocationActive,
+					bool01(liveFresh),
+					strings.TrimSpace(ver.String),
+					strings.TrimSpace(lastSeenAt.String),
+					strings.TrimSpace(lastLiveAt.String),
+					promoBal.Int64,
+					cashBal.Int64,
+					balance.Int64,
+					assigned != nil,
+					strings.Join(reasons, ","),
+				)
+			}
 		}
 		c.JSON(http.StatusOK, resp)
 	}

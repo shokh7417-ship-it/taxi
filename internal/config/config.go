@@ -42,6 +42,10 @@ type Config struct {
 	AdminAPIToken string
 	// AdminDashboardOrigin: if set, CORS allows only this origin (or a comma-separated allowlist).
 	AdminDashboardOrigin string
+	// DriverAvailableRequestsDebug enables verbose logs for GET /driver/available-requests.
+	DriverAvailableRequestsDebug bool
+	// DriverAvailableRequestsDebugDriverID optionally scopes debug logs to one driver user_id.
+	DriverAvailableRequestsDebugDriverID int64
 }
 
 // Load reads .env (if present) and builds Config from env with defaults.
@@ -86,6 +90,9 @@ func Load() (*Config, error) {
 		PickupStartMaxMeters:      pickupStartMaxM,
 		AdminAPIToken:             strings.TrimSpace(getEnv("ADMIN_API_TOKEN", "")),
 		AdminDashboardOrigin:      strings.TrimSpace(getEnv("ADMIN_DASHBOARD_ORIGIN", "")),
+		DriverAvailableRequestsDebug: strings.TrimSpace(getEnv("DRIVER_AVAILABLE_REQUESTS_DEBUG", "")) == "true" ||
+			strings.TrimSpace(getEnv("DRIVER_AVAILABLE_REQUESTS_DEBUG", "")) == "1",
+		DriverAvailableRequestsDebugDriverID: getEnvInt64("DRIVER_AVAILABLE_REQUESTS_DEBUG_DRIVER_ID", 0),
 	}
 
 	if cfg.RiderBotToken == "" {

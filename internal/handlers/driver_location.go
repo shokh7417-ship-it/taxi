@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
 	"time"
 
@@ -97,6 +98,12 @@ func DriverLocation(db *sql.DB, tripSvc *services.TripService, matchSvc *service
 					req.Lat, req.Lng, nowStr, gridID, driverID)
 				if matchSvc != nil {
 					matchSvc.PulseDriverOnlineFromHTTP(ctx, driverID)
+				}
+				if cfg.DriverAvailableRequestsDebug &&
+					(cfg.DriverAvailableRequestsDebugDriverID == 0 || cfg.DriverAvailableRequestsDebugDriverID == driverID) {
+					log.Printf(
+						"driver_http_live_location driver_id=%d live_location_active=1 last_live_location_at=%s grid_id=%s pulse=queued",
+						driverID, nowStr, gridID)
 				}
 			} else {
 				_, _ = db.ExecContext(ctx, `
