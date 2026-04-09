@@ -158,6 +158,11 @@ func DriverLocation(db *sql.DB, tripSvc *services.TripService, matchSvc *service
 			c.JSON(http.StatusOK, gin.H{"ok": true, "ignored": ignoredReason})
 			return
 		}
+		if stale {
+			// Position row was not updated (no PulseDriverOnlineFromHTTP / no live refresh); same as accuracy ignores.
+			c.JSON(http.StatusOK, gin.H{"ok": true, "ignored": "stale"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }

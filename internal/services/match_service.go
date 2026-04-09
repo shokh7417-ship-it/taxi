@@ -517,7 +517,7 @@ func (s *MatchService) PulseDriverOnlineFromHTTP(ctx context.Context, driverUser
 // NotifyDriverOfPendingRequests sends any PENDING ride requests (within this driver's radius) to a driver who just came online.
 // Skips requests already sent to this driver (request_notifications). Does not change existing dispatch logic.
 // A short delay allows a nearly-simultaneous rider request to be committed so the driver receives it.
-// Only sends if the driver's location is fresh (last_seen_at within 90s).
+// Only sends if live_location_active and last_live_location_at are fresh (same window as dispatch).
 func (s *MatchService) NotifyDriverOfPendingRequests(ctx context.Context, driverUserID int64) {
 	select {
 	case <-ctx.Done():
@@ -581,12 +581,18 @@ func (s *MatchService) NotifyDriverOfPendingRequests(ctx context.Context, driver
 		}
 		return
 	}
-	// Limit to recent waiting requests to avoid heavy scans.
-	windowSec := s.cfg.RequestExpiresSeconds
-	if windowSec <= 0 || windowSec > 3600 {
-		windowSec = 600
+	// Limit how far back we scan (bounded). Must cover the full configured request TTL so a
+	// driver who goes live late still gets backfilled offers. Capping at 600s when
+	// RequestExpiresSeconds > 3600 incorrectly skipped still-valid PENDING requests.
+	lookbackSec := 600
+	if s.cfg != nil && s.cfg.RequestExpiresSeconds > 0 {
+		lookbackSec = s.cfg.RequestExpiresSeconds
 	}
-	cutoff := time.Now().Add(-time.Duration(windowSec) * time.Second).UTC().Format("2006-01-02 15:04:05")
+	const notifyLookbackMaxSec = 86400
+	if lookbackSec > notifyLookbackMaxSec {
+		lookbackSec = notifyLookbackMaxSec
+	}
+	cutoff := time.Now().Add(-time.Duration(lookbackSec) * time.Second).UTC().Format("2006-01-02 15:04:05")
 	args := []interface{}{domain.RequestStatusPending, cutoff}
 	args = append(args, driverUserID)
 	// Only send requests that are still within TTL (expires_at > now)
