@@ -10,8 +10,9 @@ import (
 	"strings"
 
 	"github.com/joho/godotenv"
-	_ "github.com/tursodatabase/libsql-client-go/libsql"
 	"github.com/pressly/goose/v3"
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
+	_ "modernc.org/sqlite" // local file: URLs need a SQLite driver alongside libsql
 
 	"taxi-mvp/internal/db/legalrepair"
 	"taxi-mvp/internal/db/legalfingerrepair"

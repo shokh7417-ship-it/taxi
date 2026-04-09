@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
+	_ "modernc.org/sqlite" // enables DATABASE_URL=file:... local SQLite with libsql driver
 )
 
 // Open connects to Turso (libSQL), pings it, and returns the DB.
